@@ -95,7 +95,7 @@ class AxisSemantics:
 
 
 class TransformGraphNode(ABC):
-    """Mixin for classes that can act as an endpoint for a Transform (i.e. a node in a _TransformGraph)"""
+    """Mixin for classes that can act as an endpoint for a Transform (i.e. a node in a TransformGraph)"""
 
     @abstractmethod
     def axes(self) -> Iterable[AxisKey]: ...
@@ -786,15 +786,15 @@ def _ordered_unique_refs(refs: Iterable[CoordinateSystemRef]) -> Tuple[Coordinat
 
 
 @dataclass(frozen=True)
-class _TransformGraph:
+class TransformGraph:
     """
     Transform graphs consist of
     - Transforms as edges, and
     - Multiscales and CoordinateSystems as nodes.
-    The _TransformGraph is defined primarily via Transforms.
+    The TransformGraph is defined primarily via Transforms.
     Nodes are managed by the respective Transforms.
 
-    In OME-Zarr, the _TransformGraph corresponds to two metadata keys:
+    In OME-Zarr, the TransformGraph corresponds to two metadata keys:
     {
       "coordinateSystems": [...],
       "coordinateTransformations": [...],
@@ -883,7 +883,7 @@ class _TransformGraph:
                     f'Transform input and output must have "path", "name" or both. Received: {transform_dict}'
                 )
             transforms.append(t)
-        graph = _TransformGraph(transforms, system_refs=tuple(named_systems))
+        graph = TransformGraph(transforms, system_refs=tuple(named_systems))
         return graph
 
     def to_ome_zarr(

@@ -11,7 +11,7 @@ from clearscale._transforms import (
     TransformSequence,
     ScaleTransform,
     TranslationTransform,
-    _TransformGraph,
+    TransformGraph,
     CoordinateSystemRef,
     CoordinateSystem,
     _UnresolvedRef,
@@ -231,12 +231,12 @@ def _output_system_name_from_datasets(multiscale: OME_ZARR_MULTISCALE) -> Option
 
 def extract_multiscale_graph(
     multiscale: OME_ZARR_MULTISCALE,
-) -> Tuple[_TransformGraph, CoordinateSystemRef[CoordinateSystem]]:
+) -> Tuple[TransformGraph, CoordinateSystemRef[CoordinateSystem]]:
     try:
         intrinsic_system_name = _output_system_name_from_datasets(multiscale)
         if not intrinsic_system_name:
             raise ValueError(f"Invalid OME-Zarr multiscale metadata (or version older than 0.6): {multiscale!r}")
-        graph = _TransformGraph.from_ome_zarr(
+        graph = TransformGraph.from_ome_zarr(
             multiscale.get("coordinateTransformations"), multiscale.get("coordinateSystems")
         )
         potential_intrinsics = [ref for ref in graph.all_system_refs if ref.name == intrinsic_system_name]
@@ -269,13 +269,13 @@ def extract_multiscale_graph(
             f"Received: {multiscale}"
         )
         intrinsic_system_ref = intrinsic_sys.as_ref(intrinsic_system_name)
-        graph = _TransformGraph.single_isolated_system(intrinsic_system_ref)
+        graph = TransformGraph.single_isolated_system(intrinsic_system_ref)
         return graph, intrinsic_system_ref
 
 
 def multiscale_graph_from_legacy(
     multiscale: OME_ZARR_MULTISCALE, *, name: str
-) -> Tuple[_TransformGraph, CoordinateSystemRef[CoordinateSystem], Optional[MultiscaleTransforms]]:
+) -> Tuple[TransformGraph, CoordinateSystemRef[CoordinateSystem], Optional[MultiscaleTransforms]]:
     multiscale_tf_list = multiscale.get("coordinateTransformations")
     try:
         global_transforms = MultiscaleTransforms.from_list(multiscale_tf_list)
@@ -286,7 +286,7 @@ def multiscale_graph_from_legacy(
 
     intrinsic_system = CoordinateSystem.from_ome_zarr(multiscale)
     intrinsic_system_ref = intrinsic_system.as_ref(name)
-    graph = _TransformGraph.single_isolated_system(intrinsic_system_ref)
+    graph = TransformGraph.single_isolated_system(intrinsic_system_ref)
     bound_transform = None
     if global_transforms is not None:
         # Store the multiscale-level transforms as a transform to a non-existent mock system.
@@ -295,7 +295,7 @@ def multiscale_graph_from_legacy(
         mock_ref = _UnresolvedRef(name=f"{name}-intermediate")
         try:
             bound_transform = global_transforms.bound(source=intrinsic_system_ref, target=mock_ref)
-            graph = _TransformGraph([bound_transform])
+            graph = TransformGraph([bound_transform])
         except ValueError:
             # E.g. mismatching number of axes between transforms and coordinate system
             warnings.warn(f"Invalid OME-Zarr metadata: Ignoring multiscale transforms: {multiscale_tf_list!r}.")

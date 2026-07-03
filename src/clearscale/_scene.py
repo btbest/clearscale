@@ -11,7 +11,7 @@ from clearscale._transforms import (
     CoordinateSystemRef,
     _UnresolvedRef,
     Transform,
-    _TransformGraph,
+    TransformGraph,
 )
 
 MultiscalesByPath = Mapping[RelativePath, Multiscale]
@@ -25,7 +25,7 @@ UserFacingCoordinateSystemKey = Union[
 
 @dataclass(frozen=True)
 class Scene:
-    _internal_graph: _TransformGraph
+    _internal_graph: TransformGraph
     _multiscale_paths: MultiscalesByPath
     """Helper property to round-trip paths: Scene.from_ome_zarr().with_resolved().to_ome_zarr()."""
 
@@ -63,7 +63,7 @@ class Scene:
         for ms in self._multiscale_paths.values():
             all_transforms.append(ms._get_interface_transform())  # noqa: package-private, not class-private
             all_transforms.extend(ms._transform_graph.transforms)  # noqa: package-private, not class-private
-        return _TransformGraph(all_transforms)
+        return TransformGraph(all_transforms)
 
     @classmethod
     def from_ome_zarr(cls, scene_attrs: Dict[str, Any]):
@@ -73,7 +73,7 @@ class Scene:
         #  Problem: will also need shape_source for Multiscale.from_ome_zarr :)
         transform_dicts = scene_attrs.get("coordinateTransformations", [])
         system_dicts = scene_attrs.get("coordinateSystems", [])
-        graph = _TransformGraph.from_ome_zarr(transform_dicts, system_dicts)
+        graph = TransformGraph.from_ome_zarr(transform_dicts, system_dicts)
         return cls(graph, _multiscale_paths={})
 
     def with_resolved(

@@ -40,7 +40,7 @@ from clearscale._axis_values import (
 from clearscale._transforms import (
     CoordinateSystemName,
     CoordinateSystem,
-    _TransformGraph,
+    TransformGraph,
     CoordinateSystemRef,
     IdentityTransform,
     TransformGraphNode,
@@ -636,7 +636,7 @@ def _random_multiscale_name(seed: int | str | None = None) -> str:
 
 
 class Multiscale(_ScaleMapping[str, Scale], TransformGraphNode):
-    _transform_graph: _TransformGraph
+    _transform_graph: TransformGraph
     """Transform graph that by default consists only of one isolated node: _intrinsic_ref."""
     _intrinsic_ref: CoordinateSystemRef[CoordinateSystem]
     """The system in which the Scales' shape, pixel size, translation etc. are correct."""
@@ -646,7 +646,7 @@ class Multiscale(_ScaleMapping[str, Scale], TransformGraphNode):
     def __init__(
         self,
         *args,
-        _transform_graph: Optional[_TransformGraph] = None,
+        _transform_graph: Optional[TransformGraph] = None,
         _intrinsic_ref: Optional[CoordinateSystemRef[CoordinateSystem]] = None,
         _zero_scale_axes_by_key: Optional[Mapping[str, Tuple[AxisKey, ...]]] = None,
         **kwargs,
@@ -898,12 +898,12 @@ class Multiscale(_ScaleMapping[str, Scale], TransformGraphNode):
 
     def _make_single_system_graph(
         self, sys_ref: Optional[CoordinateSystemRef[CoordinateSystem]] = None
-    ) -> _TransformGraph:
+    ) -> TransformGraph:
         if sys_ref is None:
             intrinsic_sys = CoordinateSystem.without_semantics(list(self.axes()))
             intrinsic_name = _random_multiscale_name()
             sys_ref = intrinsic_sys.as_ref(intrinsic_name)
-        return _TransformGraph.single_isolated_system(sys_ref)
+        return TransformGraph.single_isolated_system(sys_ref)
 
     def as_ref(self, name: CoordinateSystemName) -> CoordinateSystemRef["Multiscale"]:
         return CoordinateSystemRef(name=str(name), owner=self)

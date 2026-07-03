@@ -7,7 +7,7 @@ from clearscale._transforms import (
     ScaleTransform,
     TransformSequence,
     TranslationTransform,
-    _TransformGraph,
+    TransformGraph,
     _UnresolvedRef,
 )
 
@@ -98,13 +98,13 @@ def test_collapsed_scale_sequence_preserves_bound_endpoints():
 
 def test_transform_graph_rejects_unbound_transforms():
     with pytest.raises(ValueError, match="Graph transforms must have bound endpoints"):
-        _TransformGraph([ScaleTransform(scale=(1, 1))])
+        TransformGraph([ScaleTransform(scale=(1, 1))])
 
 
 def test_transform_graph_keeps_bound_transforms_from_generator():
     world = _sys_ref("world", "yx")
     transform = ScaleTransform(scale=(1, 1), source=world, target=world)
 
-    graph = _TransformGraph(t for t in (transform,))
+    graph = TransformGraph(t for t in (transform,))
 
     assert graph.transforms == (transform,)

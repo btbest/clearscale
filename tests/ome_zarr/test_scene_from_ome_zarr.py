@@ -1,5 +1,5 @@
 from clearscale import Scene, Multiscale, Scale, Shape
-from clearscale._transforms import CoordinateSystem, TranslationTransform, _UnresolvedRef, _TransformGraph
+from clearscale._transforms import CoordinateSystem, TranslationTransform, _UnresolvedRef, TransformGraph
 
 from tests.ome_zarr.scene_examples import scene_stitching
 
@@ -61,7 +61,7 @@ def test_with_resolved_does_not_resolve_by_name():
         source=_UnresolvedRef(name="world"),
         target=_UnresolvedRef(path="tile_0", name="physical"),
     )
-    scene = Scene(_TransformGraph([transform], system_refs=(world,)), _multiscale_paths={})
+    scene = Scene(TransformGraph([transform], system_refs=(world,)), _multiscale_paths={})
     resolved = scene.with_resolved({"tile_0": multiscale})
 
     assert isinstance(resolved._internal_graph.transforms[0].source, _UnresolvedRef)
