@@ -342,6 +342,6 @@ zarr_group.attrs = {"multiscales": [ome_ms]}
 ome_ms = ms.to_ome_zarr(version="0.5")
 zarr_group.attrs = {"ome": {"version": "0.5", "multiscales": [ome_ms]}}
 
-ome_ms = ms.to_ome_zarr(version="0.6.dev3")
-zarr_group.attrs = {"ome": {"version": "0.6.ddev3", "multiscales": [ome_ms]}}
+ome_ms = ms.to_ome_zarr(version="0.6.dev4")
+zarr_group.attrs = {"ome": {"version": "0.6.dev4", "multiscales": [ome_ms]}}
 ```

@@ -25,9 +25,9 @@ def test_downscale_2_example():
     ms = Multiscale.from_shapes(scaling_blueprint, base=base)
 
     # 4. Export
-    zarr_group.attrs["ome"]["multiscales"] = [ms.to_ome_zarr(version="0.6.dev3")]
+    zarr_group.attrs["ome"]["multiscales"] = [ms.to_ome_zarr(version="0.6.dev4")]
 
-    written = ms.to_ome_zarr(version="0.6.dev3")
+    written = ms.to_ome_zarr(version="0.6.dev4")
     assert len(written["coordinateSystems"]) == 1
     written_system_name = written["coordinateSystems"][0]["name"]  # Capture the randomly generated name
 
@@ -37,43 +37,51 @@ def test_downscale_2_example():
         ],
         "datasets": [
             {
-                "coordinateTransformations": {
-                    "input": "s0",
-                    "output": written_system_name,
-                    "scale": [5.0, 260.0, 0.53, 0.53],
-                    "type": "scale",
-                },
+                "coordinateTransformations": [
+                    {
+                        "input": {"path": "s0"},
+                        "output": {"name": written_system_name},
+                        "scale": [5.0, 260.0, 0.53, 0.53],
+                        "type": "scale",
+                    }
+                ],
                 "path": "s0",
             },
             {
-                "coordinateTransformations": {
-                    "input": "s1",
-                    "output": written_system_name,
-                    "scale": [5.0, 520.0, 1.06, 1.06],
-                    "type": "scale",
-                },
+                "coordinateTransformations": [
+                    {
+                        "input": {"path": "s1"},
+                        "output": {"name": written_system_name},
+                        "scale": [5.0, 520.0, 1.06, 1.06],
+                        "type": "scale",
+                    }
+                ],
                 "path": "s1",
             },
             {
-                "coordinateTransformations": {
-                    "input": "s2",
-                    "output": written_system_name,
-                    "scale": [5.0, 1002.8571428571429, 2.12, 2.12],
-                    "type": "scale",
-                },
+                "coordinateTransformations": [
+                    {
+                        "input": {"path": "s2"},
+                        "output": {"name": written_system_name},
+                        "scale": [5.0, 1002.8571428571429, 2.12, 2.12],
+                        "type": "scale",
+                    }
+                ],
                 "path": "s2",
             },
             {
-                "coordinateTransformations": {
-                    "input": "s3",
-                    "output": written_system_name,
-                    "scale": [5.0, 2005.7142857142858, 4.24, 4.24],
-                    "type": "scale",
-                },
+                "coordinateTransformations": [
+                    {
+                        "input": {"path": "s3"},
+                        "output": {"name": written_system_name},
+                        "scale": [5.0, 2005.7142857142858, 4.24, 4.24],
+                        "type": "scale",
+                    }
+                ],
                 "path": "s3",
             },
         ],
-        "version": "0.6.dev3",
+        "version": "0.6.dev4",
     }
 
     assert written == expected

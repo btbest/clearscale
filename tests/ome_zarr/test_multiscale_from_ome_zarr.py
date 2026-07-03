@@ -173,7 +173,7 @@ def test_from_ome_zarr_ignores_invalid_transforms_metadata_version_0_4(metadata)
     assert read == expected
 
 
-def _0_6_dev3_metadata_with(**updates):
+def _0_6_dev4_metadata_with(**updates):
     metadata = {
         "coordinateSystems": [
             {
@@ -188,8 +188,8 @@ def _0_6_dev3_metadata_with(**updates):
                     {
                         "type": "scale",
                         "scale": [1.0, 1.0],
-                        "input": "s0",
-                        "output": "physical",
+                        "input": {"path": "s0"},
+                        "output": {"name": "physical"},
                     }
                 ],
             },
@@ -199,26 +199,26 @@ def _0_6_dev3_metadata_with(**updates):
     return metadata
 
 
-def _0_6_dev3_metadata_with_axes(axes):
-    return _0_6_dev3_metadata_with(coordinateSystems=[{"name": "physical", "axes": axes}])
+def _0_6_dev4_metadata_with_axes(axes):
+    return _0_6_dev4_metadata_with(coordinateSystems=[{"name": "physical", "axes": axes}])
 
 
 @pytest.mark.parametrize(
     "metadata",
     [
-        pytest.param(_0_6_dev3_metadata_with(coordinateSystems="yx"), id="coord-sys-not-list"),
-        pytest.param(_0_6_dev3_metadata_with(coordinateSystems=[]), id="empty-coord-sys"),
-        pytest.param(_0_6_dev3_metadata_with(coordinateSystems=[3]), id="coord-sys-not-mapping"),
-        pytest.param(_0_6_dev3_metadata_with(coordinateSystems=[{}]), id="empty-coord-sys-mapping"),
-        pytest.param(_0_6_dev3_metadata_with(coordinateSystems=[{"name": "physical"}]), id="axes-missing"),
-        pytest.param(_0_6_dev3_metadata_with_axes("yx"), id="axes-not-list"),
-        pytest.param(_0_6_dev3_metadata_with_axes([]), id="empty-axes"),
-        pytest.param(_0_6_dev3_metadata_with_axes([{}]), id="axis-missing-name"),
-        pytest.param(_0_6_dev3_metadata_with_axes([3, {"name": "x"}]), id="axis-not-mapping"),
-        pytest.param(_0_6_dev3_metadata_with_axes([{"name": "y"}, {"name": "y"}]), id="duplicate-axis-names"),
-        pytest.param(_0_6_dev3_metadata_with(datasets=[3]), id="dataset-not-mapping"),
+        pytest.param(_0_6_dev4_metadata_with(coordinateSystems="yx"), id="coord-sys-not-list"),
+        pytest.param(_0_6_dev4_metadata_with(coordinateSystems=[]), id="empty-coord-sys"),
+        pytest.param(_0_6_dev4_metadata_with(coordinateSystems=[3]), id="coord-sys-not-mapping"),
+        pytest.param(_0_6_dev4_metadata_with(coordinateSystems=[{}]), id="empty-coord-sys-mapping"),
+        pytest.param(_0_6_dev4_metadata_with(coordinateSystems=[{"name": "physical"}]), id="axes-missing"),
+        pytest.param(_0_6_dev4_metadata_with_axes("yx"), id="axes-not-list"),
+        pytest.param(_0_6_dev4_metadata_with_axes([]), id="empty-axes"),
+        pytest.param(_0_6_dev4_metadata_with_axes([{}]), id="axis-missing-name"),
+        pytest.param(_0_6_dev4_metadata_with_axes([3, {"name": "x"}]), id="axis-not-mapping"),
+        pytest.param(_0_6_dev4_metadata_with_axes([{"name": "y"}, {"name": "y"}]), id="duplicate-axis-names"),
+        pytest.param(_0_6_dev4_metadata_with(datasets=[3]), id="dataset-not-mapping"),
         pytest.param(
-            _0_6_dev3_metadata_with(
+            _0_6_dev4_metadata_with(
                 datasets=[
                     {
                         "path": "s0",
@@ -248,45 +248,45 @@ def _0_6_dev3_metadata_with_axes(axes):
         ),
     ],
 )
-def test_from_ome_zarr_raises_when_axes_or_paths_unknown_version_0_6_dev3(metadata):
+def test_from_ome_zarr_raises_when_axes_or_paths_unknown_version_0_6_dev4(metadata):
     with pytest.raises(ValueError):
         _ = Multiscale.from_ome_zarr(metadata, shape_source=lambda path: (1, 2))
 
 
-def _0_6_dev3_metadata_with_s0_transforms(transformations):
-    return _0_6_dev3_metadata_with(datasets=[{"path": "s0", "coordinateTransformations": transformations}])
+def _0_6_dev4_metadata_with_s0_transforms(transformations):
+    return _0_6_dev4_metadata_with(datasets=[{"path": "s0", "coordinateTransformations": transformations}])
 
 
-def _0_6_dev3_metadata_with_s0_scale(scale):
-    return _0_6_dev3_metadata_with_s0_transforms(
+def _0_6_dev4_metadata_with_s0_scale(scale):
+    return _0_6_dev4_metadata_with_s0_transforms(
         [{"type": "scale", "scale": scale, "input": {"path": "s0"}, "output": {"name": "physical"}}]
     )
 
 
-def _0_6_dev3_metadata_with_labels_transform_with(**updates):
+def _0_6_dev4_metadata_with_labels_transform_with(**updates):
     transform = {"input": {"name": "physical", "path": "labels/nuclei"}, "output": {"name": "physical"}}
     transform.update(updates)
-    return _0_6_dev3_metadata_with(coordinateTransformations=[transform])
+    return _0_6_dev4_metadata_with(coordinateTransformations=[transform])
 
 
 @pytest.mark.parametrize(
     "metadata",
     [
-        pytest.param(_0_6_dev3_metadata_with(datasets=[{"path": "s0"}]), id="missing-dataset-transformations"),
-        pytest.param(_0_6_dev3_metadata_with_s0_transforms([]), id="empty-dataset-transformations"),
-        pytest.param(_0_6_dev3_metadata_with_s0_transforms(3), id="dataset-transformations-not-list"),
+        pytest.param(_0_6_dev4_metadata_with(datasets=[{"path": "s0"}]), id="missing-dataset-transformations"),
+        pytest.param(_0_6_dev4_metadata_with_s0_transforms([]), id="empty-dataset-transformations"),
+        pytest.param(_0_6_dev4_metadata_with_s0_transforms(3), id="dataset-transformations-not-list"),
         pytest.param(
-            _0_6_dev3_metadata_with_s0_transforms(
+            _0_6_dev4_metadata_with_s0_transforms(
                 [{"type": "scale", "input": {"path": "s0"}, "output": {"name": "physical"}}]
             ),
             id="scale-transform-missing-scale",
         ),
-        pytest.param(_0_6_dev3_metadata_with_s0_scale("abc"), id="scale-transform-scale-not-numeric"),
-        pytest.param(_0_6_dev3_metadata_with_s0_scale([]), id="scale-transform-empty-scale"),
-        pytest.param(_0_6_dev3_metadata_with_s0_scale([1.0]), id="scale-transform-wrong-dimensionality"),
-        pytest.param(_0_6_dev3_metadata_with_s0_scale([1.0, -1.0]), id="scale-transform-negative-scale"),
+        pytest.param(_0_6_dev4_metadata_with_s0_scale("abc"), id="scale-transform-scale-not-numeric"),
+        pytest.param(_0_6_dev4_metadata_with_s0_scale([]), id="scale-transform-empty-scale"),
+        pytest.param(_0_6_dev4_metadata_with_s0_scale([1.0]), id="scale-transform-wrong-dimensionality"),
+        pytest.param(_0_6_dev4_metadata_with_s0_scale([1.0, -1.0]), id="scale-transform-negative-scale"),
         pytest.param(
-            _0_6_dev3_metadata_with_s0_transforms(
+            _0_6_dev4_metadata_with_s0_transforms(
                 [
                     {
                         "type": "sequence",
@@ -302,7 +302,7 @@ def _0_6_dev3_metadata_with_labels_transform_with(**updates):
             id="translation-transform-wrong-dimensionality",
         ),
         pytest.param(
-            _0_6_dev3_metadata_with_s0_transforms(
+            _0_6_dev4_metadata_with_s0_transforms(
                 [
                     {
                         "type": "affine",
@@ -314,44 +314,44 @@ def _0_6_dev3_metadata_with_labels_transform_with(**updates):
             ),
             id="transform-type-invalid-for-dataset",
         ),
-        pytest.param(_0_6_dev3_metadata_with(coordinateTransformations=3), id="multiscale-transforms-not-list"),
-        pytest.param(_0_6_dev3_metadata_with(coordinateTransformations=[]), id="multiscale-transforms-empty"),
-        pytest.param(_0_6_dev3_metadata_with(coordinateTransformations=[3]), id="multiscale-transform-not-list"),
-        pytest.param(_0_6_dev3_metadata_with(coordinateTransformations=[{}]), id="multiscale-transform-empty"),
+        pytest.param(_0_6_dev4_metadata_with(coordinateTransformations=3), id="multiscale-transforms-not-list"),
+        pytest.param(_0_6_dev4_metadata_with(coordinateTransformations=[]), id="multiscale-transforms-empty"),
+        pytest.param(_0_6_dev4_metadata_with(coordinateTransformations=[3]), id="multiscale-transform-not-list"),
+        pytest.param(_0_6_dev4_metadata_with(coordinateTransformations=[{}]), id="multiscale-transform-empty"),
         pytest.param(
-            _0_6_dev3_metadata_with_labels_transform_with(type="scale"), id="multiscale-transform-scale-missing-values"
+            _0_6_dev4_metadata_with_labels_transform_with(type="scale"), id="multiscale-transform-scale-missing-values"
         ),
         pytest.param(
-            _0_6_dev3_metadata_with_labels_transform_with(type="scale", scale="abc"),
+            _0_6_dev4_metadata_with_labels_transform_with(type="scale", scale="abc"),
             id="multiscale-transform-scale-not-list",
         ),
         pytest.param(
-            _0_6_dev3_metadata_with_labels_transform_with(type="scale", scale=[]), id="multiscale-transform-scale-empty"
+            _0_6_dev4_metadata_with_labels_transform_with(type="scale", scale=[]), id="multiscale-transform-scale-empty"
         ),
         pytest.param(
-            _0_6_dev3_metadata_with_labels_transform_with(type="scale", scale=[1.0]),
+            _0_6_dev4_metadata_with_labels_transform_with(type="scale", scale=[1.0]),
             id="multiscale-transform-scale-wrong-dimensionality",
         ),
         pytest.param(
-            _0_6_dev3_metadata_with_labels_transform_with(type="scale", scale=[1.0, -1.0]),
+            _0_6_dev4_metadata_with_labels_transform_with(type="scale", scale=[1.0, -1.0]),
             id="multiscale-transform-negative-scale",
         ),
         pytest.param(
-            _0_6_dev3_metadata_with_labels_transform_with(
+            _0_6_dev4_metadata_with_labels_transform_with(
                 type="sequence",
                 transformations=[{"type": "scale", "scale": [1.0, 1.0]}, {"type": "translation", "translation": [0.0]}],
             ),
             id="multiscale-transform-translation-wrong-dimensionality",
         ),
         pytest.param(
-            _0_6_dev3_metadata_with_labels_transform_with(
+            _0_6_dev4_metadata_with_labels_transform_with(
                 type="displacements", path="coordinateTransformations/displacements1"
             ),
             id="multiscale-transform-type-not-supported-by-clearscale",
         ),
     ],
 )
-def test_from_ome_zarr_ignores_invalid_transforms_metadata_version_0_6_dev3(metadata):
+def test_from_ome_zarr_ignores_invalid_transforms_metadata_version_0_6_dev4(metadata):
     read = Multiscale.from_ome_zarr(metadata, shape_source=lambda path: (1, 2))
     expected = Multiscale({"s0": Scale(shape=Shape(y=1, x=2))})
     assert read == expected

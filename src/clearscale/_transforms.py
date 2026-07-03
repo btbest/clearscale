@@ -41,7 +41,7 @@ if TYPE_CHECKING:
             _Self = TypeVar("_Self")
             Self = _Self
 
-RelativePath = str  # 0.6.dev3: scene["coordinateTransformations"][]["input"]["path"]
+RelativePath = str  # 0.6.dev4: scene["coordinateTransformations"][]["input"]["path"]
 CoordinateSystemName = str  # str from ["input"]["name"]
 NodesByPath = Mapping[RelativePath, "TransformGraphNode"]
 AnyTransformGraphNode = TypeVar("AnyTransformGraphNode", bound="TransformGraphNode")
@@ -123,6 +123,10 @@ class CoordinateSystemRef(Generic[AnyTransformGraphNode]):
     owner: Optional[AnyTransformGraphNode]
     """The Multiscale or CoordinateSystem that produced this, for identity. None only in _UnresolvedRef"""
 
+    def __post_init__(self):
+        if not self.name:
+            raise ValueError("Coordinate systems must always be referenced at least by name.")
+
     def __eq__(self, other):
         if type(self) is not type(other):
             return NotImplemented
@@ -131,9 +135,7 @@ class CoordinateSystemRef(Generic[AnyTransformGraphNode]):
     def __hash__(self):
         return hash((type(self), self.name, id(self.owner)))
 
-    def to_ome_zarr(self, for_scene: bool, path: Optional[RelativePath] = None) -> Union[CoordinateSystemName, Dict]:
-        if not for_scene:
-            return self.name
+    def to_ome_zarr(self, path: Optional[RelativePath] = None) -> Dict:
         if path:
             return {"name": self.name, "path": path}
         return {"name": self.name}
@@ -142,8 +144,10 @@ class CoordinateSystemRef(Generic[AnyTransformGraphNode]):
 @dataclass(frozen=True, slots=True)
 class _UnresolvedRef(CoordinateSystemRef):
     """Degenerate placeholder reference.
-    Enables round-trip serialization and graph traversal without fully resolved scene metadata."""
+    Enables round-trip serialization and graph traversal without fully resolved scene metadata.
+    Also used for the awkwardness that multiscale-datasets have an actual zarr-array as input (path-only ref)."""
 
+    name: Optional[CoordinateSystemName]
     path: Optional[RelativePath] = None
     owner: Optional[TransformGraphNode] = field(default=None, init=False)
 
@@ -151,10 +155,7 @@ class _UnresolvedRef(CoordinateSystemRef):
         if not self.name and not self.path:
             raise ValueError("_UnresolvedRef requires at least one of: name, path")
 
-    def to_ome_zarr(self, for_scene: bool, _=None) -> Union[CoordinateSystemName, Dict]:
-        assert for_scene or not self.path, "Unresolved refs with path only allowed inside Scenes"
-        if not for_scene:
-            return self.name
+    def to_ome_zarr(self, _=None) -> Dict:
         d = {}
         if self.path:
             d["path"] = self.path
@@ -214,7 +215,7 @@ class CoordinateSystem(_AxisMapping[AxisKey, AxisSemantics], TransformGraphNode)
         self,
         *,
         name: CoordinateSystemName,
-        version="0.6.dev3",
+        version="0.6.dev4",
         axis_types: Union[None, Literal["infer"], Mapping[str, Literal["space", "time", "channel"]]] = None,
         unit: Unit = None,
         long_names: Mapping[AxisKey, str] = None,
@@ -296,13 +297,11 @@ class Transform(ABC):
     def __post_init__(self) -> None:
         self._validate_bound_axes()
 
-    def to_ome_zarr(self, version: str, *, for_scene: bool, nodes_by_path: Optional[NodesByPath] = None) -> Dict:
+    def to_ome_zarr(self, version: str, *, nodes_by_path: Optional[NodesByPath] = None) -> Dict:
         ome_zarr_transform_dict = self._get_subtype_ome_zarr_properties(version)
         if version in PRE_TRANSFORMS_VERSIONS:
             return ome_zarr_transform_dict
         if not self.is_fully_bound:
-            if for_scene:
-                raise ValueError("OME-Zarr Scene transforms must be `.bound(source, target)`")
             return ome_zarr_transform_dict
         input_dict = {}
         output_dict = {}
@@ -310,13 +309,13 @@ class Transform(ABC):
             if node is None:
                 continue
             if self.source.owner is node:
-                input_dict = self.source.to_ome_zarr(for_scene, path)
+                input_dict = self.source.to_ome_zarr(path)
             if self.target.owner is node:
-                output_dict = self.target.to_ome_zarr(for_scene, path)
+                output_dict = self.target.to_ome_zarr(path)
             if input_dict and output_dict:
                 break
-        input_dict = input_dict or self.source.to_ome_zarr(for_scene)
-        output_dict = output_dict or self.target.to_ome_zarr(for_scene)
+        input_dict = input_dict or self.source.to_ome_zarr()
+        output_dict = output_dict or self.target.to_ome_zarr()
         ome_zarr_transform_dict.update({"input": input_dict, "output": output_dict})
         return ome_zarr_transform_dict
 
@@ -691,16 +690,14 @@ class TransformSequence(Transform):
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict:
         return {
             "type": "sequence",
-            "transformations": [t.to_ome_zarr(version, for_scene=False) for t in self.transforms],
+            "transformations": [t.to_ome_zarr(version) for t in self.transforms],
         }
 
-    def to_ome_zarr(
-        self, version: str, *, for_scene: bool, nodes_by_path: Optional[NodesByPath] = None
-    ) -> Union[Dict, List]:
+    def to_ome_zarr(self, version: str, *, nodes_by_path: Optional[NodesByPath] = None) -> Union[Dict, List]:
         if version in PRE_TRANSFORMS_VERSIONS:
-            return [t.to_ome_zarr(version, for_scene=False) for t in self.transforms]
+            return [t.to_ome_zarr(version) for t in self.transforms]
         else:
-            return super(TransformSequence, self).to_ome_zarr(version, for_scene=for_scene, nodes_by_path=nodes_by_path)
+            return super(TransformSequence, self).to_ome_zarr(version, nodes_by_path=nodes_by_path)
 
     def __post_init__(self):
         if not self.transforms:
@@ -887,15 +884,15 @@ class TransformGraph:
         return graph
 
     def to_ome_zarr(
-        self, version="0.6.dev3", nodes_by_path: Optional[NodesByPath] = None
+        self, version="0.6.dev4", nodes_by_path: Optional[NodesByPath] = None
     ) -> Dict[Literal["coordinateTransformations", "coordinateSystems"], List[Dict]]:
-        if version != "0.6.dev3":
+        if version != "0.6.dev4":
             warnings.warn(
                 f"Unsupported OME-Zarr version {version!r}. "
-                f"This method only targets 0.6.dev3 as of 03/2026. Metadata may be invalid."
+                f"This method only targets 0.6.dev4 as of 07/2026. Metadata may be invalid."
             )
         systems = [ref.owner.to_ome_zarr(name=ref.name, version=version) for ref in self.all_system_refs]
-        transforms = [t.to_ome_zarr(version, for_scene=True, nodes_by_path=nodes_by_path) for t in self.transforms]
+        transforms = [t.to_ome_zarr(version, nodes_by_path=nodes_by_path) for t in self.transforms]
         d: Dict[Literal["coordinateTransformations", "coordinateSystems"], List[Dict]] = {}
         if systems:
             d["coordinateSystems"] = systems

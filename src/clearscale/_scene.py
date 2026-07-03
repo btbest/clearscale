@@ -94,7 +94,7 @@ class Scene:
         return replace(self, _internal_graph=graph, _multiscale_paths=paths)
 
     def to_ome_zarr(
-        self, *, version: str = "0.6.dev3", multiscales_by_path: Optional[MultiscalesByPath] = None
+        self, *, version: str = "0.6.dev4", multiscales_by_path: Optional[MultiscalesByPath] = None
     ) -> Dict:
         coordinate_system_dicts = []
         for ref in self._internal_graph.system_refs:
@@ -109,7 +109,7 @@ class Scene:
             cleaned = {k: v for k, v in multiscales_by_path.items() if k not in (None, "")}
             all_paths.update(cleaned)
         coordinate_transformations_dicts = [
-            t.to_ome_zarr(version, for_scene=True, nodes_by_path=all_paths) for t in self._internal_graph.transforms
+            t.to_ome_zarr(version, nodes_by_path=all_paths) for t in self._internal_graph.transforms
         ]
 
         result: Dict = {"coordinateTransformations": coordinate_transformations_dicts}

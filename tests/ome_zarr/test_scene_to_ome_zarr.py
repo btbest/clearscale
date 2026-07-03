@@ -15,6 +15,6 @@ def with_transform_names_removed(meta: Dict[str, Any]) -> Dict[str, Any]:
 
 def test_stitching_example_roundtrip(scene_stitching):
     scene = Scene.from_ome_zarr(scene_stitching)
-    output_json = scene.to_ome_zarr(version="0.6.dev3")
+    output_json = scene.to_ome_zarr(version="0.6.dev4")
 
     assert output_json == with_transform_names_removed(scene_stitching)

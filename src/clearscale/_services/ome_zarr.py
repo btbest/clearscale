@@ -19,8 +19,8 @@ from clearscale._transforms import (
     Transform,
 )
 
-SUPPORTED_OME_ZARR_VERSIONS_READ = ("0.1", "0.2", "0.3", "0.4", "0.5", "0.6.dev3")
-SUPPORTED_OME_ZARR_VERSIONS_WRITE = ("0.4", "0.5", "0.6.dev3")
+SUPPORTED_OME_ZARR_VERSIONS_READ = ("0.1", "0.2", "0.3", "0.4", "0.5", "0.6.dev4")
+SUPPORTED_OME_ZARR_VERSIONS_WRITE = ("0.4", "0.5", "0.6.dev4")
 
 ####
 # Reading
@@ -117,7 +117,7 @@ class MultiscaleTransforms(TransformSequence):
     def from_list(cls, ome_transformations: Optional[OME_ZARR_TRANSFORMS]) -> Optional["MultiscaleTransforms"]:
         """
         Possibilities for ome_transformations:
-        0.6.dev3 multiscale[datasets][n][coordinateTransformations]:
+        0.6.dev4 multiscale[datasets][n][coordinateTransformations]:
         - List of one ScaleTransform
         - List of one IdentityTransform
         - List of one TransformSequence containing one ScaleTransform and one TranslationTransform
@@ -440,13 +440,17 @@ def build_dataset_dict(
     serialized_zero_scale_axes: Iterable[AxisKey] = (),
 ) -> Dict[str, Any]:
     scale = pixel_size_to_scale_with_reintroduced_zeros(dataset_scale, serialized_zero_scale_axes)
+    components = (scale,)
     if not dataset_translation.is_identity():
         translation = TranslationTransform.from_translation(dataset_translation)
-        final = TransformSequence((scale, translation)).bound(source=_UnresolvedRef(name=key), target=intrinsic_ref)
-    elif version in PRE_TRANSFORMS_VERSIONS:
-        final = TransformSequence((scale,))
+        components = (scale, translation)
+    if version in PRE_TRANSFORMS_VERSIONS:
+        dataset_transforms = TransformSequence(components).to_ome_zarr(version)
     else:
-        final = scale.bound(source=_UnresolvedRef(name=key), target=intrinsic_ref)
-    dataset_transforms = final.to_ome_zarr(version, for_scene=False)
+        dataset_path = _UnresolvedRef(name=None, path=str(key))
+        # The "single transform inside a list" requirement of 0.6 actually makes this more awkward
+        single_t = TransformSequence(components) if len(components) > 1 else components[0]
+        single_dict = single_t.bound(source=dataset_path, target=intrinsic_ref).to_ome_zarr(version)
+        dataset_transforms = [single_dict]
     dataset_dict = {"path": str(key), "coordinateTransformations": dataset_transforms}
     return dataset_dict

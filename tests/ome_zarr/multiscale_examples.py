@@ -75,7 +75,7 @@ OME_ZARR_MIN_MS_0_4 = {
     ],
 }
 OME_ZARR_MIN_MS_0_5 = OME_ZARR_MIN_MS_0_4
-OME_ZARR_MIN_MS_0_6_DEV3 = {
+OME_ZARR_MIN_MS_0_6_DEV4 = {
     "coordinateSystems": [
         {
             "name": "physical",
@@ -88,12 +88,14 @@ OME_ZARR_MIN_MS_0_6_DEV3 = {
     "datasets": [
         {
             "path": "s0",
-            "coordinateTransformations": {
-                "type": "scale",
-                "scale": [0.2, 0.2],
-                "input": "s0",
-                "output": "physical",
-            },
+            "coordinateTransformations": [
+                {
+                    "type": "scale",
+                    "scale": [0.2, 0.2],
+                    "input": {"path": "s0"},
+                    "output": {"name": "physical"},
+                }
+            ],
         }
     ],
 }
@@ -150,7 +152,7 @@ OME_ZARR_MAX_MS_0_4 = {
     "omero": OMERO_EXAMPLE,
 }
 OME_ZARR_MAX_MS_0_5 = {key: value for key, value in OME_ZARR_MAX_MS_0_4.items() if key != "version"}
-OME_ZARR_MAX_MS_0_6_DEV3 = {
+OME_ZARR_MAX_MS_0_6_DEV4 = {
     "coordinateSystems": [
         {
             "name": "physical",
@@ -170,30 +172,34 @@ OME_ZARR_MAX_MS_0_6_DEV3 = {
     "datasets": [
         {
             "path": "s0",
-            "coordinateTransformations": {
-                "type": "scale",
-                "scale": [120.0, 1.0, 1.0, 0.2, 0.2],
-                "input": "s0",
-                "output": "physical",
-            },
+            "coordinateTransformations": [
+                {
+                    "type": "scale",
+                    "scale": [120.0, 1.0, 1.0, 0.2, 0.2],
+                    "input": {"path": "s0"},
+                    "output": {"name": "physical"},
+                }
+            ],
         },
         {
             "path": "s1",
-            "coordinateTransformations": {
-                "type": "sequence",
-                "transformations": [
-                    {
-                        "type": "scale",
-                        "scale": [120.0, 1.0, 1.0, 0.4, 0.4],
-                    },
-                    {
-                        "type": "translation",
-                        "translation": [0.0, 0.0, 0.0, 0.2, 0.2],
-                    },
-                ],
-                "input": "s1",
-                "output": "physical",
-            },
+            "coordinateTransformations": [
+                {
+                    "type": "sequence",
+                    "transformations": [
+                        {
+                            "type": "scale",
+                            "scale": [120.0, 1.0, 1.0, 0.4, 0.4],
+                        },
+                        {
+                            "type": "translation",
+                            "translation": [0.0, 0.0, 0.0, 0.2, 0.2],
+                        },
+                    ],
+                    "input": {"path": "s1"},
+                    "output": {"name": "physical"},
+                }
+            ],
         },
     ],
     "coordinateTransformations": [
@@ -226,7 +232,7 @@ _MINIMAL_MULTISCALE_EXAMPLES = (
     MultiscaleMetadataExample("0.3", OME_ZARR_MIN_MS_0_3, ndim=2),
     MultiscaleMetadataExample("0.4", OME_ZARR_MIN_MS_0_4, ndim=2),
     MultiscaleMetadataExample("0.5", OME_ZARR_MIN_MS_0_5, ndim=2),
-    MultiscaleMetadataExample("0.6.dev3", OME_ZARR_MIN_MS_0_6_DEV3, ndim=2),
+    MultiscaleMetadataExample("0.6.dev4", OME_ZARR_MIN_MS_0_6_DEV4, ndim=2),
 )
 
 _MAXIMAL_MULTISCALE_EXAMPLES = (
@@ -235,7 +241,7 @@ _MAXIMAL_MULTISCALE_EXAMPLES = (
     MultiscaleMetadataExample("0.3", OME_ZARR_MAX_MS_0_3, ndim=5),
     MultiscaleMetadataExample("0.4", OME_ZARR_MAX_MS_0_4, ndim=5),
     MultiscaleMetadataExample("0.5", OME_ZARR_MAX_MS_0_5, ndim=5),
-    MultiscaleMetadataExample("0.6.dev3", OME_ZARR_MAX_MS_0_6_DEV3, ndim=5),
+    MultiscaleMetadataExample("0.6.dev4", OME_ZARR_MAX_MS_0_6_DEV4, ndim=5),
 )
 
 

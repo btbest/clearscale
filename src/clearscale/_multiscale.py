@@ -822,12 +822,12 @@ class Multiscale(_ScaleMapping[str, Scale], TransformGraphNode):
     def to_ome_zarr(
         self,
         *,
-        version: Literal["0.4", "0.5", "0.6.dev3"],
+        version: Literal["0.4", "0.5", "0.6.dev4"],
         name: Optional[str] = None,
         axis_types: Union[None, Literal["infer"], Mapping[str, Literal["space", "time", "channel"]]] = None,
     ) -> Dict[str, Any]:
         if version not in ome_zarr.SUPPORTED_OME_ZARR_VERSIONS_WRITE:
-            raise ValueError("Cannot write OME-Zarr versions other than 0.4, 0.5 and 0.6.dev3.")
+            raise ValueError("Cannot write OME-Zarr versions other than 0.4, 0.5 and 0.6.dev4.")
         ome_zarr.validate_multiscale(self)
         result = {"version": version, "datasets": []}
 
@@ -874,7 +874,7 @@ class Multiscale(_ScaleMapping[str, Scale], TransformGraphNode):
         assert (
             len(legacy_tfs) <= 1
         ), f"Dev error: More than one multiscale-level transform in {self._transform_graph.transforms}"
-        result["coordinateTransformations"] = legacy_tfs[0].to_ome_zarr(version, for_scene=False)
+        result["coordinateTransformations"] = legacy_tfs[0].to_ome_zarr(version)
         axes = list(self.axes())
         global_scale = ome_zarr.scale_to_pixel_size_with_normalized_zeros(legacy_tfs[0].scale_transform, axes)
         global_translation = Translation.identity(axes)
