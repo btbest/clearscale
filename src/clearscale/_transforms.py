@@ -264,14 +264,6 @@ class CoordinateSystem(_AxisMapping[AxisKey, AxisSemantics], TransformGraphNode)
         return Unit([(a, sem._ome_zarr_unit or "") for a, sem in self.items()])  # noqa
 
 
-CoordinateSystemRefs = Tuple[CoordinateSystemRef[CoordinateSystem], ...]
-
-
-def _ordered_unique_refs(refs: Iterable[CoordinateSystemRef]) -> Tuple[CoordinateSystemRef, ...]:
-    """Deduplicate graph refs while preserving declared/first-seen metadata order."""
-    return tuple(dict.fromkeys(refs))
-
-
 @dataclass(frozen=True, slots=True)
 class Transform(ABC):
     """
@@ -783,6 +775,14 @@ class TransformSequence(Transform):
                 raise ValueError(
                     f"Transform chain dimensionality mismatches at {i}->{i+1}: {earlier._target_ndim_by_payload()!r} != {later._source_ndim_by_payload()!r}"
                 )
+
+
+CoordinateSystemRefs = Tuple[CoordinateSystemRef[CoordinateSystem], ...]
+
+
+def _ordered_unique_refs(refs: Iterable[CoordinateSystemRef]) -> Tuple[CoordinateSystemRef, ...]:
+    """Deduplicate graph refs while preserving declared/first-seen metadata order."""
+    return tuple(dict.fromkeys(refs))
 
 
 @dataclass(frozen=True)
