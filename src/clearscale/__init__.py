@@ -10,17 +10,8 @@ from clearscale._multiscale import (
     half_pixel_shift,
 )
 from clearscale._scene import Scene
-from clearscale._transforms import (
-    AxisSemantics,
-    IdentityTransform,
-    ScaleTransform,
-    Transform,
-    TransformSequence,
-    TranslationTransform,
-)
 
 __all__ = [
-    "AxisSemantics",
     "BlueprintFactors",
     "BlueprintShapes",
     "DuplicatePolicy",
@@ -30,13 +21,9 @@ __all__ = [
     "PixelOffset",
     "PixelSize",
     "Scale",
-    "ScaleTransform",
     "Scene",
     "Shape",
-    "Transform",
-    "TransformSequence",
     "Translation",
-    "TranslationTransform",
     "Unit",
     "half_pixel_shift",
 ]
