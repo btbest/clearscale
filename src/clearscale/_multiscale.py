@@ -712,22 +712,15 @@ class Multiscale(_ScaleMapping[str, Scale], TransformGraphNode):
         *,
         shape_source: ome_zarr.ShapeSource,
     ):
-        ome_zarr.validate_multiscales_dict(multiscale_dict)
+        ome_zarr.require_dataset_paths(multiscale_dict)
         get_shape = ome_zarr.normalize_shape_source_to_callable(shape_source)
-        intrinsic_system_name = ome_zarr.intrinsic_system_name_from_multiscale(multiscale_dict)
-        if intrinsic_system_name:
-            graph, intrinsic_system_ref = ome_zarr.multiscale_graph_from_transforms(
-                multiscale_dict, name=intrinsic_system_name
-            )
+        try:
+            transform_graph, intrinsic_system_ref = ome_zarr.extract_multiscale_graph(multiscale_dict)
             global_transforms = None
-        else:
+        except ValueError:
             intrinsic_system_name = _random_multiscale_name()
-            multiscale_tf_list = multiscale_dict.get("coordinateTransformations")
-            global_transforms = ome_zarr.MultiscaleTransforms.from_list(multiscale_tf_list)
-            if multiscale_tf_list and global_transforms is None:
-                warnings.warn("Pixel size metadata at multiscale-level was invalid.")
-            graph, intrinsic_system_ref, global_transforms = ome_zarr.multiscale_graph_from_legacy(
-                multiscale_dict, name=intrinsic_system_name, global_transforms=global_transforms
+            transform_graph, intrinsic_system_ref, global_transforms = ome_zarr.multiscale_graph_from_legacy(
+                multiscale_dict, name=intrinsic_system_name
             )
         axis_keys = list(intrinsic_system_ref.owner.axes())
         unit = intrinsic_system_ref.owner.get_unit()
@@ -740,29 +733,14 @@ class Multiscale(_ScaleMapping[str, Scale], TransformGraphNode):
             scale_shape = Shape(zip(axis_keys, get_shape(scale_key)))
             if base_shape is None:
                 base_shape = scale_shape
+            relative_scale_factor = base_shape.scaling_to(scale_shape)
+            relative_scale_pixel_size = PixelSize.identity(axis_keys) * relative_scale_factor
             transformations = dataset.get("coordinateTransformations")
-            dataset_transforms = ome_zarr.MultiscaleTransforms.from_list(transformations)
-            if dataset_transforms is None:
-                # OME-Zarr up to v0.3 didn't have coordinateTransformations
-                scale_factor = base_shape.scaling_to(scale_shape)
-                scale_pixel_size = PixelSize.identity(axis_keys).scaled_by(scale_factor)
-                scale_translation = None
-            else:
-                zero_scale_axes = ome_zarr.zero_scale_axes(dataset_transforms.scale_transform, axis_keys)
-                if zero_scale_axes:
-                    zero_scale_axes_by_key[scale_key] = zero_scale_axes
-                if global_transforms is not None:
-                    dataset_transforms = TransformSequence((dataset_transforms, global_transforms)).collapsed(
-                        raise_uncollapsed=True
-                    )
-                scale_pixel_size = ome_zarr.pixel_size_from_scale_transform(
-                    dataset_transforms.scale_transform, axis_keys
-                )
-                scale_translation = (
-                    dataset_transforms.translation_transform.to_translation(axis_keys)
-                    if dataset_transforms.translation_transform
-                    else None
-                )
+            scale_pixel_size, scale_translation, zero_scale_axes = ome_zarr.scale_meta_from_dataset_transforms(
+                axis_keys, global_transforms, relative_scale_pixel_size, transformations
+            )
+            if zero_scale_axes:
+                zero_scale_axes_by_key[scale_key] = zero_scale_axes
             scales_items.append(
                 (
                     scale_key,
@@ -771,7 +749,7 @@ class Multiscale(_ScaleMapping[str, Scale], TransformGraphNode):
             )
         return cls(
             scales_items,
-            _transform_graph=graph,
+            _transform_graph=transform_graph,
             _intrinsic_ref=intrinsic_system_ref,
             _zero_scale_axes_by_key=zero_scale_axes_by_key,
         )
@@ -898,7 +876,7 @@ class Multiscale(_ScaleMapping[str, Scale], TransformGraphNode):
         ), f"Dev error: More than one multiscale-level transform in {self._transform_graph.transforms}"
         result["coordinateTransformations"] = legacy_tfs[0].to_ome_zarr(version, for_scene=False)
         axes = list(self.axes())
-        global_scale = ome_zarr.pixel_size_from_scale_transform(legacy_tfs[0].scale_transform, axes)
+        global_scale = ome_zarr.scale_to_pixel_size_with_normalized_zeros(legacy_tfs[0].scale_transform, axes)
         global_translation = Translation.identity(axes)
         if legacy_tfs[0].translation_transform:
             global_translation = legacy_tfs[0].translation_transform.to_translation(axes)

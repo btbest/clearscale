@@ -4,6 +4,7 @@ import numbers
 import warnings
 from abc import ABC, abstractmethod
 from collections import defaultdict, deque
+from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, field, replace, fields
 from itertools import chain
 from typing import (
@@ -199,9 +200,13 @@ class CoordinateSystem(_AxisMapping[AxisKey, AxisSemantics], TransformGraphNode)
             # v0.3 allowed specifying a subset of tczyx, e.g. ["t", "c", "y", "x"]
             return cls.without_semantics(axis_dicts)
         semantics_by_axis = []
+        seen_axes = set()
         for axis_dict in system_or_multiscale_dict["axes"]:
-            if not axis_dict.get("name"):
+            if not isinstance(axis_dict, MappingABC) or not axis_dict.get("name"):
                 raise ValueError(f"Invalid axis metadata: Missing axis name. Received: {system_or_multiscale_dict}")
+            if axis_dict["name"] in seen_axes:
+                raise ValueError(f"Invalid axis metadata: Two axes named {axis_dict['name']}")
+            seen_axes.add(axis_dict["name"])
             semantics_by_axis.append((axis_dict["name"], AxisSemantics.from_ome_zarr(axis_dict)))
         return cls(semantics_by_axis)
 
@@ -295,6 +300,9 @@ class Transform(ABC):
         At a minimum, this includes {'type': '<ome-zarr type name>'}.
         The common properties (input/output) are handled in the base class."""
         pass
+
+    def __post_init__(self) -> None:
+        self._validate_bound_axes()
 
     def to_ome_zarr(self, version: str, *, for_scene: bool, nodes_by_path: Optional[NodesByPath] = None) -> Dict:
         ome_zarr_transform_dict = self._get_subtype_ome_zarr_properties(version)
@@ -437,6 +445,61 @@ class Transform(ABC):
         target = endpoints["output"]
         return source, target
 
+    def _source_ndim_by_payload(self) -> Optional[int]:
+        """Source dimensionality implied by this transform's payload value (not the bound source).
+        None means any dimensionality works."""
+        return None
+
+    def _target_ndim_by_payload(self) -> Optional[int]:
+        """See _source_ndim_by_payload, but for self.target.
+        Only differs from source_ndim if the transform drops/adds axes."""
+        return None
+
+    def _validate_bound_axes(self) -> None:
+        source_axes = self.source.owner.axes() if self.source and self.source.owner else None
+        target_axes = self.target.owner.axes() if self.target and self.target.owner else None
+
+        source_ndim = self._source_ndim_by_payload()
+        if source_ndim is not None and source_axes is not None and len(source_axes) != source_ndim:
+            raise ValueError(
+                f"{self.__class__.__name__} expects {source_ndim} source axes, but its source "
+                f"coordinate system has {len(source_axes)}: {list(source_axes)}"
+            )
+        target_ndim = self._target_ndim_by_payload()
+        if target_ndim is not None and target_axes is not None and len(target_axes) != target_ndim:
+            raise ValueError(
+                f"{self.__class__.__name__} expects {target_ndim} target axes, but its target "
+                f"coordinate system has {len(target_axes)}: {list(target_axes)}"
+            )
+        if (
+            source_ndim is None
+            and target_ndim is None
+            and source_axes is not None
+            and target_axes is not None
+            and len(source_axes) != len(target_axes)
+        ):
+            # Payload gives no axis information -> source and target must be equal dimensionality.
+            # Transform types that change axis number must provide explicit source/target_ndim.
+            raise ValueError(
+                f"{self.__class__.__name__} endpoints have incompatible dimensionality: "
+                f"source {list(source_axes)} vs target {list(target_axes)}"
+            )
+
+    def _endpoints_can_chain_after(self, earlier: "Transform") -> bool:
+        if earlier.target is None or self.source is None or earlier.target == self.source:
+            return True
+        self_ndim = self._source_ndim_by_payload()
+        earlier_ndim = earlier._target_ndim_by_payload()
+        if self_ndim is None or earlier_ndim is None or self_ndim == earlier_ndim:
+            return True
+        return False
+
+    def _composed_source(self, earlier: "Transform") -> Optional[CoordinateSystemRef]:
+        return earlier.source if earlier.source is not None else self.source
+
+    def _composed_target(self, earlier: "Transform") -> Optional[CoordinateSystemRef]:
+        return self.target if self.target is not None else earlier.target
+
     # Import methods: These handle normalizing common image processing packages' conventions for
     # computing/providing transforms to OME-Zarr's convention.
     # They're only applicable for certain subclasses, so should go there
@@ -459,9 +522,9 @@ class IdentityTransform(Transform):
         return replace(self, source=self.target, target=self.source)
 
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
-        if earlier.target is not None and self.source is not None and earlier.target != self.source:
+        if not self._endpoints_can_chain_after(earlier):
             return None
-        return replace(earlier, target=self.target)
+        return replace(earlier, source=self._composed_source(earlier), target=self._composed_target(earlier))
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict:
         return {"type": "identity"}
@@ -485,11 +548,25 @@ class ScaleTransform(Transform):
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
         if not isinstance(earlier, ScaleTransform):
             return None
-        return replace(self, scale=tuple(a * b for a, b in zip(self.scale, earlier.scale)), ome_zarr_path=None)
+        if not self._endpoints_can_chain_after(earlier):
+            return None
+        return replace(
+            self,
+            scale=tuple(a * b for a, b in zip(self.scale, earlier.scale)),
+            source=self._composed_source(earlier),
+            target=self._composed_target(earlier),
+            ome_zarr_path=None,
+        )
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict:
         payload_dict = {"path": self.ome_zarr_path} if self.ome_zarr_path else {"scale": list(self.scale)}
         return {"type": "scale", **payload_dict}
+
+    def _source_ndim_by_payload(self) -> Optional[int]:
+        return len(self.scale)
+
+    def _target_ndim_by_payload(self) -> Optional[int]:
+        return len(self.scale)
 
     @classmethod
     def from_pixel_size(cls, pixel_size: PixelSize):
@@ -498,33 +575,29 @@ class ScaleTransform(Transform):
     @classmethod
     def from_ome_zarr(cls, ome_dict: Dict) -> "ScaleTransform":
         raw = ome_dict.get("scale")
-        if not raw or not all(isinstance(v, numbers.Real) for v in raw):
+        try:
+            scale = tuple(raw)
+        except TypeError:
+            scale = ()
+        if not scale or not all(isinstance(v, numbers.Real) for v in scale):
             raise ValueError(f"Invalid scale transform metadata. Expected sequence of numbers, received: {raw!r}")
         source, target = cls._parse_source_and_target(ome_dict)
         return cls(
-            scale=tuple(ome_dict.get("scale") or []),
+            scale=scale,
             ome_zarr_path=ome_dict.get("path"),
             source=source,
             target=target,
         )
 
-    def to_pixel_size(self, axes: Optional[Iterable[AxisKey]] = None) -> PixelSize:
+    def to_pixel_size(self, axes: Iterable[AxisKey]) -> PixelSize:
         if not self.scale:
             raise ValueError("Cannot derive PixelSize: Values not set.")
-        final_axes = axes or self._axes()
-        return PixelSize(zip(final_axes, self.scale))
-
-    def _axes(self) -> Iterable[AxisKey]:
-        """Must be kept in sync with TranslationTransform._axes"""
-        # TODO: Move to base class?
-        if self.is_fully_unbound:
-            raise ValueError("Missing axes: Bind to coordinate systems or multiscales first to define.")
-        if self.is_fully_unresolved:
+        axes = tuple(axes)
+        if len(axes) != len(self.scale):
             raise ValueError(
-                "Missing axes: Resolve at least one multiscale first to define. "
-                f"Source: {self.source}, Target: {self.target}"
+                f"Cannot derive PixelSize: expected {len(self.scale)} axes, received {len(axes)}: {list(axes)}"
             )
-        return self.source.owner.axes() if self.source else self.target.owner.axes()
+        return PixelSize(zip(axes, self.scale))
 
 
 @dataclass(frozen=True, slots=True)
@@ -543,13 +616,25 @@ class TranslationTransform(Transform):
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
         if not isinstance(earlier, TranslationTransform):
             return None
+        if not self._endpoints_can_chain_after(earlier):
+            return None
         return replace(
-            self, translation=tuple(a + b for a, b in zip(self.translation, earlier.translation)), ome_zarr_path=None
+            self,
+            translation=tuple(a + b for a, b in zip(self.translation, earlier.translation)),
+            source=self._composed_source(earlier),
+            target=self._composed_target(earlier),
+            ome_zarr_path=None,
         )
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict:
         payload_dict = {"path": self.ome_zarr_path} if self.ome_zarr_path else {"translation": list(self.translation)}
         return {"type": "translation", **payload_dict}
+
+    def _source_ndim_by_payload(self) -> Optional[int]:
+        return len(self.translation)
+
+    def _target_ndim_by_payload(self) -> Optional[int]:
+        return len(self.translation)
 
     @classmethod
     def from_translation(cls, translation: Translation):
@@ -557,30 +642,31 @@ class TranslationTransform(Transform):
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Dict) -> "TranslationTransform":
+        raw = ome_dict.get("translation")
+        try:
+            translation = tuple(raw)
+        except TypeError:
+            translation = ()
+        if not translation or not all(isinstance(v, numbers.Real) for v in translation):
+            raise ValueError(f"Invalid translation transform metadata. Expected sequence of numbers, received: {raw!r}")
         source, target = cls._parse_source_and_target(ome_dict)
         return cls(
-            translation=tuple(ome_dict.get("translation") or []),
+            translation=translation,
             ome_zarr_path=ome_dict.get("path"),
             source=source,
             target=target,
         )
 
-    def to_translation(self, axes: Optional[Iterable[AxisKey]] = None) -> Translation:
+    def to_translation(self, axes: Iterable[AxisKey]) -> Translation:
         if not self.translation:
             raise ValueError("Cannot derive Translation: Values not set")
-        final_axes = axes or self._axes()
-        return Translation(zip(final_axes, self.translation))
-
-    def _axes(self):
-        """Must be kept in sync with ScaleTransform._axes"""
-        if self.is_fully_unbound:
-            raise ValueError("Missing axes: Bind to coordinate systems or multiscales first to define.")
-        if self.is_fully_unresolved:
+        axes = tuple(axes)
+        if len(axes) != len(self.translation):
             raise ValueError(
-                "Missing axes: Resolve at least one multiscale first to define. "
-                f"Source: {self.source}, Target: {self.target}"
+                f"Cannot derive Translation: expected {len(self.translation)} axes, "
+                f"received {len(axes)}: {list(axes)}"
             )
-        return self.source.owner.axes() if self.source.owner else self.target.owner.axes()
+        return Translation(zip(axes, self.translation))
 
 
 @dataclass(frozen=True, slots=True)
@@ -597,12 +683,18 @@ class TransformSequence(Transform):
         return TransformSequence(tuple(reversed([t.inverted() for t in self.transforms])))
 
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
-        # TODO: compatibility check if self or earlier is bound, and/or axis compatibility
-        # See if maybe that check ends up working out identical across Transform subclasses
-        # and move to the base class if so
+        if not self._endpoints_can_chain_after(earlier):
+            return None
+        source = self._composed_source(earlier)
+        target = self._composed_target(earlier)
         if isinstance(earlier, TransformSequence):
-            return replace(earlier, transforms=tuple(earlier.transforms + self.transforms))
-        return replace(self, transforms=(earlier,) + self.transforms)
+            return replace(
+                earlier,
+                transforms=tuple(earlier.transforms + self.transforms),
+                source=source,
+                target=target,
+            )
+        return replace(self, transforms=(earlier,) + self.transforms, source=source, target=target)
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict:
         return {
@@ -625,7 +717,7 @@ class TransformSequence(Transform):
             raise ValueError("All children must be Transform instances.")
         for i, (a, b) in enumerate(zip(self.transforms, self.transforms[1:])):
             if a.target is not None and b.source is not None and a.target != b.source:
-                raise ValueError(f"Transform chain broken at {i}→{i+1}: {a.target!r} != {b.source!r}")
+                raise ValueError(f"Transform chain broken at {i}->{i+1}: {a.target!r} != {b.source!r}")
         # Infer source/target from children if not explicitly provided
         inferred_source = self.transforms[0].source
         inferred_target = self.transforms[-1].target
@@ -633,6 +725,14 @@ class TransformSequence(Transform):
             object.__setattr__(self, "source", inferred_source)
         if self.target is None and inferred_target is not None:
             object.__setattr__(self, "target", inferred_target)
+        self._validate_child_ndim_chain()
+        Transform.__post_init__(self)
+
+    def _source_ndim_by_payload(self) -> Optional[int]:
+        return self.transforms[0]._source_ndim_by_payload()
+
+    def _target_ndim_by_payload(self) -> Optional[int]:
+        return self.transforms[-1]._target_ndim_by_payload()
 
     def __hash__(self):
         return hash(self.transforms)
@@ -676,6 +776,13 @@ class TransformSequence(Transform):
         if len(result) == 1:
             return result[0]
         return replace(self, transforms=tuple(result))
+
+    def _validate_child_ndim_chain(self) -> None:
+        for i, (earlier, later) in enumerate(zip(self.transforms, self.transforms[1:])):
+            if earlier._target_ndim_by_payload() != later._source_ndim_by_payload():
+                raise ValueError(
+                    f"Transform chain dimensionality mismatches at {i}->{i+1}: {earlier._target_ndim_by_payload()!r} != {later._source_ndim_by_payload()!r}"
+                )
 
 
 @dataclass(frozen=True)
@@ -728,10 +835,14 @@ class _TransformGraph:
         )
 
     def __post_init__(self):
-        bad = [t for t in self.transforms if t.source is None or t.target is None]
+        transforms = tuple(self.transforms)
+        bad_types = [t for t in transforms if not isinstance(t, Transform)]
+        if bad_types:
+            raise TypeError(f"Graph edges must be Transform instances: {bad_types}")
+        bad = [t for t in transforms if not t.is_fully_bound]
         if bad:
             raise ValueError(f"Graph transforms must have bound endpoints: {bad}")
-        object.__setattr__(self, "transforms", tuple(self.transforms))
+        object.__setattr__(self, "transforms", transforms)
         object.__setattr__(self, "system_refs", _ordered_unique_refs(self.system_refs))
 
     @classmethod
@@ -742,9 +853,18 @@ class _TransformGraph:
     def from_ome_zarr(cls, transform_dicts: Optional[List[Dict]], system_dicts: Optional[List[Dict]]):
         transform_dicts = transform_dicts or []
         system_dicts = system_dicts or []
+        if not isinstance(transform_dicts, list) or not isinstance(system_dicts, list):
+            raise ValueError(
+                "Invalid graph metadata: Expected lists. "
+                f"Received coordinate systems: {system_dicts!r} and transforms: {transform_dicts!r}"
+            )
         named_systems: List[CoordinateSystemRef[CoordinateSystem]] = []
         seen_names = set()
         for system_dict in system_dicts:
+            if not isinstance(system_dict, MappingABC):
+                raise ValueError(
+                    f"Invalid graph metadata: Expected coordinate system dictionary. Received: {system_dict!r}"
+                )
             system = CoordinateSystem.from_ome_zarr(system_dict)
             name: CoordinateSystemName = system_dict.get("name")
             if not name:

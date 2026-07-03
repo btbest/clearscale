@@ -1,4 +1,19 @@
-from clearscale._transforms import CoordinateSystem, _UnresolvedRef, TranslationTransform
+import pytest
+
+from clearscale import Multiscale, Scale, Shape
+from clearscale._transforms import (
+    CoordinateSystem,
+    IdentityTransform,
+    ScaleTransform,
+    TransformSequence,
+    TranslationTransform,
+    _TransformGraph,
+    _UnresolvedRef,
+)
+
+
+def _sys_ref(name, axes):
+    return CoordinateSystem.without_semantics(axes).as_ref(name)
 
 
 def test_with_resolved_by_name_does_not_resolve_path_refs():
@@ -10,3 +25,86 @@ def test_with_resolved_by_name_does_not_resolve_path_refs():
 
     assert resolved.source is world
     assert resolved.target is original_target
+
+
+def test_bound_scale_rejects_axis_count_mismatch():
+    world = _sys_ref("world", "yx")
+
+    with pytest.raises(ValueError, match="ScaleTransform expects 3 source axes"):
+        ScaleTransform(scale=(1, 1, 1)).bound(source=world, target=world)
+
+
+def test_bound_translation_rejects_endpoint_axis_count_mismatch():
+    source = _sys_ref("source", "yx")
+    target = _sys_ref("target", "zyx")
+
+    with pytest.raises(ValueError, match="TranslationTransform expects 2 target axes"):
+        TranslationTransform(translation=(0, 0)).bound(source=source, target=target)
+
+
+def test_bound_identity_rejects_endpoint_axis_count_mismatch():
+    source = _sys_ref("source", "yx")
+    target = _sys_ref("target", "zyx")
+
+    with pytest.raises(ValueError, match="IdentityTransform endpoints have incompatible dimensionality"):
+        IdentityTransform().bound(source=source, target=target)
+
+
+def test_resolving_transform_revalidates_endpoint_axes():
+    multiscale = Multiscale({"s0": Scale(Shape(z=1, y=2, x=3))})
+    world = _sys_ref("world", "yx")
+    transform = TranslationTransform(
+        translation=(0, 0),
+        source=_UnresolvedRef(path="tile_0", name="physical"),
+        target=world,
+    )
+
+    with pytest.raises(ValueError, match="TranslationTransform expects 2 source axes"):
+        transform.with_resolved({"tile_0": multiscale})
+
+
+def test_transform_sequence_rejects_mismatched_axis_value_counts():
+    with pytest.raises(ValueError, match="Transform chain dimensionality mismatches at 0->1: 2 != 3"):
+        TransformSequence((ScaleTransform(scale=(1, 1)), TranslationTransform(translation=(0, 0, 0))))
+
+
+def test_bound_transform_sequence_rejects_endpoint_axis_count_mismatch():
+    source = _sys_ref("source", "yx")
+    target = _sys_ref("target", "zyx")
+    sequence = TransformSequence((IdentityTransform(), IdentityTransform()))
+
+    with pytest.raises(ValueError, match="TransformSequence endpoints have incompatible dimensionality"):
+        sequence.bound(source=source, target=target)
+
+
+def test_collapsed_scale_sequence_preserves_bound_endpoints():
+    source = _sys_ref("source", "yx")
+    middle = _sys_ref("middle", "yx")
+    target = _sys_ref("target", "yx")
+    sequence = TransformSequence(
+        (
+            ScaleTransform(scale=(2, 3), source=source, target=middle),
+            ScaleTransform(scale=(5, 7), source=middle, target=target),
+        )
+    )
+
+    collapsed = sequence.collapsed()
+
+    assert isinstance(collapsed, ScaleTransform)
+    assert collapsed.source == source
+    assert collapsed.target == target
+    assert collapsed.scale == (10, 21)
+
+
+def test_transform_graph_rejects_unbound_transforms():
+    with pytest.raises(ValueError, match="Graph transforms must have bound endpoints"):
+        _TransformGraph([ScaleTransform(scale=(1, 1))])
+
+
+def test_transform_graph_keeps_bound_transforms_from_generator():
+    world = _sys_ref("world", "yx")
+    transform = ScaleTransform(scale=(1, 1), source=world, target=world)
+
+    graph = _TransformGraph(t for t in (transform,))
+
+    assert graph.transforms == (transform,)

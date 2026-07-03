@@ -93,23 +93,6 @@ def _as_transform_list(ome_transformations: Optional[OME_ZARR_TRANSFORMS]) -> Li
     return []
 
 
-def zero_scale_axes(scale_transform: ScaleTransform, axes: Sequence[AxisKey]) -> Tuple[AxisKey, ...]:
-    return tuple(axis for axis, value in zip(axes, scale_transform.scale) if value == 0)
-
-
-def pixel_size_from_scale_transform(scale_transform: ScaleTransform, axes: Sequence[AxisKey]) -> PixelSize:
-    normalized_scale = (PixelSize._default if value == 0 else value for value in scale_transform.scale)
-    return PixelSize(zip(axes, normalized_scale))
-
-
-def scale_transform_from_pixel_size(
-    pixel_size: PixelSize, serialized_zero_scale_axes: Iterable[AxisKey] = ()
-) -> ScaleTransform:
-    zero_axes = set(serialized_zero_scale_axes)
-    scale = tuple(0.0 if axis in zero_axes else pixel_size[axis] for axis in pixel_size)
-    return ScaleTransform(scale=scale)
-
-
 @dataclass(frozen=True, slots=True)
 class MultiscaleTransforms(TransformSequence):
     def __post_init__(self):
@@ -176,13 +159,13 @@ class MultiscaleTransforms(TransformSequence):
         if scale is None and translation is None:
             return None
         elif scale is None:
-            scale = ScaleTransform(scale=tuple(1.0 for _ in range(len(translation.translation))))
+            scale = ScaleTransform(scale=tuple(1.0 for _ in range(translation._source_ndim_by_payload())))
         return cls(transforms=(scale,) if translation is None else (scale, translation))
 
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
         if not isinstance(earlier, MultiscaleTransforms):
             return None
-        if earlier.target is not None and self.source is not None and earlier.target != self.source:
+        if not self._endpoints_can_chain_after(earlier):
             return None
         scale_product = self.scale_transform.composed_with(earlier.scale_transform)
         if earlier.translation_transform is not None and self.translation_transform is not None:
@@ -194,10 +177,15 @@ class MultiscaleTransforms(TransformSequence):
             transforms = (scale_product, self.translation_transform)
         else:
             transforms = (scale_product,)
-        return replace(self, source=earlier.source, transforms=transforms)
+        return replace(
+            self,
+            source=self._composed_source(earlier),
+            target=self._composed_target(earlier),
+            transforms=transforms,
+        )
 
 
-def validate_multiscales_dict(raw: Dict):
+def require_dataset_paths(raw: Dict):
     """Light top-level checks. coordinateTransformations are validated later."""
     version = raw.get("version")
     if version and version not in SUPPORTED_OME_ZARR_VERSIONS_READ:
@@ -206,19 +194,29 @@ def validate_multiscales_dict(raw: Dict):
     if "datasets" not in raw or not raw["datasets"] or not isinstance(raw["datasets"], list):
         raise ValueError(f"Invalid OME-Zarr metadata: no datasets in: {raw!r}")
 
+    seen_paths = set()
     for ds in raw["datasets"]:
-        if "path" not in ds or not ds["path"] or not isinstance(ds["path"], str):
+        if not isinstance(ds, Mapping) or "path" not in ds or not ds["path"] or not isinstance(ds["path"], str):
             raise ValueError(f"Invalid OME-Zarr metadata: dataset missing path {ds!r} in: {raw!r}")
+        if ds["path"] in seen_paths:
+            raise ValueError(f"Invalid OME-Zarr metadata: multiple datasets reference path {ds['path']} in: {raw!r}")
+        seen_paths.add(ds["path"])
 
-    if (
-        version is not None
-        and version not in ("0.1", "0.2", "0.3")
-        and any("coordinateTransformations" not in d or not d["coordinateTransformations"] for d in raw["datasets"])
+    if version not in ("0.1", "0.2", "0.3") and any(
+        (
+            "coordinateTransformations" not in d
+            or not d["coordinateTransformations"]
+            or not isinstance(d["coordinateTransformations"], list)
+        )
+        for d in raw["datasets"]
     ):
-        raise ValueError(f"Invalid OME-Zarr metadata: datasets with invalid transformations in: {raw}")
+        warnings.warn(
+            f"Invalid OME-Zarr metadata: dataset(s) with no transformations. "
+            f"Will infer pixel size as relative scaling factors. Received: {raw}"
+        )
 
 
-def intrinsic_system_name_from_multiscale(multiscale: OME_ZARR_MULTISCALE) -> Optional[str]:
+def _output_system_name_from_datasets(multiscale: OME_ZARR_MULTISCALE) -> Optional[str]:
     transforms = _as_transform_list(multiscale["datasets"][0].get("coordinateTransformations"))
     if not transforms:
         return None
@@ -231,49 +229,61 @@ def intrinsic_system_name_from_multiscale(multiscale: OME_ZARR_MULTISCALE) -> Op
     return None
 
 
-def multiscale_graph_from_transforms(
-    multiscale: OME_ZARR_MULTISCALE, *, name: str
+def extract_multiscale_graph(
+    multiscale: OME_ZARR_MULTISCALE,
 ) -> Tuple[_TransformGraph, CoordinateSystemRef[CoordinateSystem]]:
     try:
+        intrinsic_system_name = _output_system_name_from_datasets(multiscale)
+        if not intrinsic_system_name:
+            raise ValueError(f"Invalid OME-Zarr multiscale metadata (or version older than 0.6): {multiscale!r}")
         graph = _TransformGraph.from_ome_zarr(
             multiscale.get("coordinateTransformations"), multiscale.get("coordinateSystems")
         )
-        potential_intrinsics = [ref for ref in graph.all_system_refs if ref.name == name]
+        potential_intrinsics = [ref for ref in graph.all_system_refs if ref.name == intrinsic_system_name]
         if len(potential_intrinsics) != 1:
             raise ValueError(
                 "Invalid OME-Zarr multiscale metadata: Expected exactly one coordinate system named "
-                f"{name!r}. Received: {multiscale}"
+                f"{intrinsic_system_name!r}. Received: {multiscale}"
             )
         intrinsic_system_ref = potential_intrinsics[0]
         return graph, intrinsic_system_ref
     except ValueError as e:
         try:
             # Best effort: Is there any coordinate system we can use at all?
-            name_matches = [sys_d for sys_d in multiscale["coordinateSystems"] if sys_d["name"] == name]
+            name_matches = [
+                sys_d for sys_d in multiscale["coordinateSystems"] if sys_d["name"] == intrinsic_system_name
+            ]
             if name_matches:
                 intrinsic_sys = CoordinateSystem.from_ome_zarr(name_matches[0])
+                intrinsic_system_name = name_matches[0]["name"]
             elif multiscale["coordinateSystems"]:
                 intrinsic_sys = CoordinateSystem.from_ome_zarr(multiscale["coordinateSystems"][0])
+                intrinsic_system_name = multiscale["coordinateSystems"][0]["name"]
             else:
                 raise ValueError()
-        except (KeyError, ValueError):
+        except (KeyError, ValueError, TypeError):
             raise e
         warnings.warn(
             "Invalid coordinateTransformations and/or coordinateSystems metadata. Proceeding without. "
             f"Error: {str(e)}"
             f"Received: {multiscale}"
         )
-        intrinsic_system_ref = intrinsic_sys.as_ref(name)
+        intrinsic_system_ref = intrinsic_sys.as_ref(intrinsic_system_name)
         graph = _TransformGraph.single_isolated_system(intrinsic_system_ref)
         return graph, intrinsic_system_ref
 
 
 def multiscale_graph_from_legacy(
-    multiscale: OME_ZARR_MULTISCALE,
-    *,
-    name: str,
-    global_transforms: Optional[MultiscaleTransforms] = None,
+    multiscale: OME_ZARR_MULTISCALE, *, name: str
 ) -> Tuple[_TransformGraph, CoordinateSystemRef[CoordinateSystem], Optional[MultiscaleTransforms]]:
+    multiscale_tf_list = multiscale.get("coordinateTransformations")
+    try:
+        global_transforms = MultiscaleTransforms.from_list(multiscale_tf_list)
+    except ValueError:
+        global_transforms = None
+    if multiscale_tf_list and global_transforms is None:
+        warnings.warn(f"Pixel size metadata at multiscale-level was invalid. Received: {multiscale_tf_list!r}")
+
     intrinsic_system = CoordinateSystem.from_ome_zarr(multiscale)
     intrinsic_system_ref = intrinsic_system.as_ref(name)
     graph = _TransformGraph.single_isolated_system(intrinsic_system_ref)
@@ -283,9 +293,99 @@ def multiscale_graph_from_legacy(
         # This allows Multiscale.to_ome_zarr to divide/subtract them back out of Scale.pixel_size/.translation
         # for perfect metadata round-trip.
         mock_ref = _UnresolvedRef(name=f"{name}-intermediate")
-        bound_transform = global_transforms.bound(source=intrinsic_system_ref, target=mock_ref)
-        graph = _TransformGraph([bound_transform])
+        try:
+            bound_transform = global_transforms.bound(source=intrinsic_system_ref, target=mock_ref)
+            graph = _TransformGraph([bound_transform])
+        except ValueError:
+            # E.g. mismatching number of axes between transforms and coordinate system
+            warnings.warn(f"Invalid OME-Zarr metadata: Ignoring multiscale transforms: {multiscale_tf_list!r}.")
     return graph, intrinsic_system_ref, bound_transform
+
+
+def scale_meta_from_dataset_transforms(
+    axis_keys: Sequence[AxisKey],
+    global_transforms: "MultiscaleTransforms",
+    relative_scale_pixel_size: PixelSize,
+    transformations: Optional[OME_ZARR_TRANSFORMS],
+) -> Tuple[PixelSize, Optional[Translation], Optional[Tuple[AxisKey, ...]]]:
+    """
+    Extract pixel size and translation according to this dataset's `coordinateTransformations`.
+    Returns the scale's:
+        - pixel size (defaulting to 1.0 or relative factor if invalid meta)
+        - translation (defaulting to None if invalid meta)
+        - a tuple of axis keys where the `scale` transform was 0.0 (normally None, purely for metadata round-trip)
+    """
+    if transformations is None:
+        # Fine: OME-Zarr up to v0.3 didn't have coordinateTransformations
+        return relative_scale_pixel_size, None, None
+
+    try:
+        dataset_transforms = MultiscaleTransforms.from_list(transformations)
+    except ValueError:
+        warnings.warn(
+            f"Invalid OME-Zarr metadata: dataset scale and translation transform do not match each other. "
+            "Continuing with relative scale factor as pixel size. Received: "
+            f"{transformations!r}"
+        )
+        return relative_scale_pixel_size, None, None
+
+    if dataset_transforms is None:
+        # Meta existed and was valid but e.g. empty
+        warnings.warn(
+            f'Invalid OME-Zarr metadata: expected at least a "scale" transform, but found none. '
+            "Continuing with relative scale factor as pixel size. Received: "
+            f"{transformations!r}"
+        )
+        return relative_scale_pixel_size, None, None
+
+    if len(axis_keys) != len(dataset_transforms.scale_transform.scale):
+        warnings.warn(
+            f"Invalid OME-Zarr metadata: dataset reports {len(dataset_transforms.scale_transform.scale)} "
+            f"pixel size values, mismatching its axes {list(axis_keys)}. "
+            "Continuing with relative scale factor as pixel size. Received: "
+            f"{dataset_transforms.scale_transform.scale!r}"
+        )
+        return relative_scale_pixel_size, None, None
+
+    composed_transforms = dataset_transforms
+
+    if global_transforms is not None:
+        try:
+            composed_transforms = TransformSequence((dataset_transforms, global_transforms)).collapsed(
+                raise_uncollapsed=True
+            )
+        except ValueError:
+            pass
+
+    if any(v < 0.0 for v in composed_transforms.scale_transform.scale):
+        warnings.warn(
+            f"Invalid OME-Zarr metadata: dataset has negative pixel size values. "
+            "Continuing with relative scale factor as pixel size. Received: "
+            f"{composed_transforms.scale_transform.scale!r}"
+        )
+        return relative_scale_pixel_size, None, None
+
+    scale_pixel_size = scale_to_pixel_size_with_normalized_zeros(composed_transforms.scale_transform, axis_keys)
+    scale_translation = (
+        composed_transforms.translation_transform.to_translation(axis_keys)
+        if composed_transforms.translation_transform
+        else None
+    )
+    zeros = tuple(axis for axis, value in zip(axis_keys, composed_transforms.scale_transform.scale) if value == 0)
+    return scale_pixel_size, scale_translation, zeros
+
+
+def scale_to_pixel_size_with_normalized_zeros(scale_transform: ScaleTransform, axes: Sequence[AxisKey]) -> PixelSize:
+    normalized_scale = (PixelSize._default if value == 0 else value for value in scale_transform.scale)
+    return PixelSize(zip(axes, normalized_scale))
+
+
+def pixel_size_to_scale_with_reintroduced_zeros(
+    pixel_size: PixelSize, serialized_zero_scale_axes: Iterable[AxisKey] = ()
+) -> ScaleTransform:
+    zero_axes = set(serialized_zero_scale_axes)
+    scale = tuple(0.0 if axis in zero_axes else pixel_size[axis] for axis in pixel_size)
+    return ScaleTransform(scale=scale)
 
 
 ####
@@ -339,7 +439,7 @@ def build_dataset_dict(
     intrinsic_ref: Optional[CoordinateSystemRef[CoordinateSystem]] = None,
     serialized_zero_scale_axes: Iterable[AxisKey] = (),
 ) -> Dict[str, Any]:
-    scale = scale_transform_from_pixel_size(dataset_scale, serialized_zero_scale_axes)
+    scale = pixel_size_to_scale_with_reintroduced_zeros(dataset_scale, serialized_zero_scale_axes)
     if not dataset_translation.is_identity():
         translation = TranslationTransform.from_translation(dataset_translation)
         final = TransformSequence((scale, translation)).bound(source=_UnresolvedRef(name=key), target=intrinsic_ref)
