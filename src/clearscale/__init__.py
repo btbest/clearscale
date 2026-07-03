@@ -7,7 +7,9 @@ from clearscale._multiscale import (
     DuplicatePolicy,
     Multiscale,
     Scale,
-    half_pixel_shift,
+    discrete_bin_center,
+    half_pixel_space_preservation,
+    first_value_decimation,
 )
 from clearscale._scene import Scene
 
@@ -25,5 +27,7 @@ __all__ = [
     "Shape",
     "Translation",
     "Unit",
-    "half_pixel_shift",
+    "discrete_bin_center",
+    "half_pixel_space_preservation",
+    "first_value_decimation",
 ]

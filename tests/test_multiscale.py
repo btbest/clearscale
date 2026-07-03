@@ -1,5 +1,15 @@
 import pytest
-from clearscale import BlueprintShapes, Multiscale, PixelSize, Scale, Shape, Translation, Unit, half_pixel_shift
+from clearscale import (
+    BlueprintShapes,
+    Multiscale,
+    PixelSize,
+    Scale,
+    Shape,
+    Translation,
+    Unit,
+    discrete_bin_center,
+    half_pixel_space_preservation,
+)
 
 
 def test_blueprint_hash_matches_value_equality():
@@ -57,9 +67,37 @@ def test_blueprint_shapes_apply_to_scale_can_apply_half_pixel_shift():
         translation=Translation(y=10.0, x=-5.0),
     )
 
-    multiscale = blueprint.apply_to_scale(base, translation_shift_func=half_pixel_shift)
+    multiscale = blueprint.apply_to_scale(base, translation_shift_func=half_pixel_space_preservation)
 
+    # Along y: 8 -> 4 px = factor 2. Pixel size 2.0 * 2 = 4.0
+    #   s0 data space begins at 10.0-(2.0/2) = 9.0
+    #   s1 first pixel coordinate is at 9.0 + (4.0 / 2) = 11.0
+    # Along x: 8 -> 2 px = factor 4. Pixel size 3.0 * 4 = 12.0
+    #   s0 data space begins at -5.0-(3.0/2) = -6.5
+    #   s1 first pixel coordinate is at -6.5 + (12.0 / 2) = -0.5
     assert multiscale["s1"].pixel_size == PixelSize(y=4.0, x=12.0)
+    assert multiscale["s1"].translation == Translation(y=11.0, x=-0.5)
+
+
+def test_blueprint_shapes_apply_to_scale_can_apply_bin_center_shift():
+    blueprint = BlueprintShapes({"s0": Shape(y=5, x=8), "s1": Shape(y=2, x=4)})
+    base = Scale(
+        shape=Shape(y=5, x=8),
+        pixel_size=PixelSize(y=0.6, x=2.0),
+        translation=Translation(y=10.0, x=-5.0),
+    )
+
+    multiscale = blueprint.apply_to_scale(base, translation_shift_func=discrete_bin_center)
+
+    # Along y: 5 -> 2 px = factor 2.5 (Pixel size 0.6 * 2.5 = 1.5)
+    #   Implicit bin size = ceil(2.5) = 3
+    #   In this case first scaled pixel coordinate = middle bin coordinate = 10.0 + 0.6
+    #   (or: bin space start: 10.0 - 0.6/2 = 9.7; bin extent = 0.6 * 3 = 1.8; bin center = 9.7 + 1.8/2 = 10.6)
+    # Along x: 8 -> 4 px = factor 2 (Pixel size 2.0 * 2 = 4.0)
+    #   Implicit bin size = 2
+    #   First bin coordinates = -5.0 and -3.0; bin center = -4.0
+    assert multiscale["s1"].pixel_size == PixelSize(y=1.5, x=4.0)
+    assert multiscale["s1"].translation == Translation(y=10.6, x=-4.0)
 
 
 @pytest.mark.parametrize("shift_func", [(lambda param1: True), (lambda scale1, scale2: True)])
