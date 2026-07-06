@@ -216,6 +216,11 @@ assert multiscale["s2"].shape == Shape(z=40, y=128, x=128)
 assert multiscale["s2"].pixel_size == PixelSize(z=0.5, y=1.0, x=1.0)
 ```
 
+By default, `apply_to_scale` keeps the base scale's translation for all derived scales.
+If your scaling operation changes where the first output pixel belongs in physical space, choose an explicit `translation_shift_func`.
+(Most commonly used scaling methods do.)
+See [Which shift is the right one for my scaling method?](translation_shifts.md#which-shift-is-the-right-one-for-my-scaling-method) for the built-in shift conventions and detector.
+
 If your processing code naturally thinks in scaling factors instead of output shapes, use `BlueprintFactors`.
 In this case, you need to specify how your data scaling handles rounding when factors unevenly divide shapes.
 This is necessary for accurate metadata calculation.

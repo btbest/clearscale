@@ -1,11 +1,12 @@
 # Repo structure
 
-In order from lowest to highest level:
+`src/clearscale/`, in order from lowest to highest level:
 
 - `_axis_values.py` defines primitives (Shape, Unit, PixelSize, ...)
 - `_transforms.py` defines the transformation graph primitives for OME-Zarr 0.6 concepts
 - `_multiscale.py` defines the primary user-value objects (Scale, Multiscale, BlueprintShapes and BlueprintFactors)
 - `services` currently only breaks out helpers for `_multiscale.py`.
+- `_translation_shifts.py` defines public helpers for diagnosing and calculating coordinate offsets introduced by scaling functions (related to `_multiscale.py`)
 - `_scene.py` defines the Scene concept of OME-Zarr 0.6
 - `ome_zarr.py` lives outside of this hierarchy; it currently provides some user-facing helpers for `Multiscale`
 

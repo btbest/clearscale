@@ -7,11 +7,15 @@ from clearscale._multiscale import (
     DuplicatePolicy,
     Multiscale,
     Scale,
+)
+from clearscale._scene import Scene
+from clearscale._translation_shift import (
+    TranslationShiftFunction,
     discrete_bin_center,
     half_pixel_space_preservation,
     first_value_decimation,
+    detect_translation_shift,
 )
-from clearscale._scene import Scene
 
 __all__ = [
     "BlueprintFactors",
@@ -30,4 +34,5 @@ __all__ = [
     "discrete_bin_center",
     "half_pixel_space_preservation",
     "first_value_decimation",
+    "detect_translation_shift",
 ]
