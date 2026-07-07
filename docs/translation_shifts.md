@@ -85,9 +85,9 @@ The first `s1` pixel is therefore at `-0.15 + 0.3 = 0.15`.
 ## `discrete_bin_center`: bin-averaging
 
 Use `discrete_bin_center` for block or bin downsampling where each output value represents the center of the source pixels that contributed to that bin.
-This fits local mean, max, min, median, or similar pooling methods.
+This cleanly fits a local mean pooling method, but it is also the closest simple approximation for non-linear pooling methods like max, min or median.
 
-For exact integer factors, the numeric shift can be the same as `half_pixel_space_preservation`.
+For exact integer scaling factors, the numeric shift can be the same as `half_pixel_space_preservation`.
 The distinction still matters: choosing the appropriate function documents the pooling convention.
 
 ```python
@@ -116,7 +116,6 @@ block_factors = BlueprintFactors(
         "s2": Factor(y=4, x=4),
     }
 )
-blueprint = block_factors.to_shapes(base.shape, rounding="ceil")
 
 # Data scaling, for example with scikit-image:
 # import numpy as np
@@ -131,8 +130,9 @@ blueprint = block_factors.to_shapes(base.shape, rounding="ceil")
 #         func=np.mean,
 #     )
 
-multiscale = blueprint.apply_to_scale(
+multiscale = block_factors.apply_to_scale(
     base,
+    rounding="ceil",
     translation_shift_func=discrete_bin_center,
 )
 
@@ -142,14 +142,13 @@ assert multiscale["s2"].translation == Translation(y=0.375, x=0.375)
 ```
 
 For `s2`, each output pixel summarizes a `4 x 4` block.
-The first output pixel represents input pixel centers at `0.0`, `0.25`, `0.5`, and `0.75 micrometer` along each axis, so its center is `0.375 micrometer`.
+The first output pixel is pooled from input pixel centers at `0.0`, `0.25`, `0.5`, and `0.75 micrometer` along each axis.
+These represent the space from `-0.125` to `0.875 micrometer` placing the pooled pixel's center at `0.375 micrometer`.
 
 ## `first_value_decimation`: stride from the first sample
 
 Use `first_value_decimation` when the scaled array keeps the first source value and then takes every `n`-th value.
 This is common for quick preview pyramids or for label images where the chosen policy is explicitly first-sample decimation, for example `labels[::4, ::4]`.
-
-If your nearest-neighbor implementation samples block centers instead, use a shift function that matches that center-sampling behavior instead.
 
 ```python
 from clearscale import (
@@ -177,7 +176,6 @@ stride_factors = BlueprintFactors(
         "s2": Factor(y=4, x=4),
     }
 )
-blueprint = stride_factors.to_shapes(base.shape, rounding="ceil")
 
 # Data scaling with first-value stride slicing:
 # decimated_arrays = {}
@@ -186,8 +184,9 @@ blueprint = stride_factors.to_shapes(base.shape, rounding="ceil")
 #     stride_x = int(factor["x"])
 #     decimated_arrays[scale_key] = labels_yx[::stride_y, ::stride_x]
 
-multiscale = blueprint.apply_to_scale(
+multiscale = stride_factors.apply_to_scale(
     base,
+    rounding="ceil",
     translation_shift_func=first_value_decimation,
 )
 

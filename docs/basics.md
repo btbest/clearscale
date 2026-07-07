@@ -270,30 +270,31 @@ Take note though that Factors in clearscale are *divisors for shape*:
 For example, to downscale by 2, you could use `skimage.transform.rescale(image, 0.5)` or `scipy.ndimage.zoom(image, 0.5)`.
 In this case you would use `scale_factor.inverted().to_tuple()`.
 
-### OME-Zarr stays at the edge
+### Reading and writing OME-Zarr
 
-Most code should not need to know the OME-Zarr metadata schema.
-Keep clearscale objects in your own logic, then convert at the read/write boundary:
+In a nutshell, for simple cases:
 
 ```python
 from clearscale import Multiscale
 
+# Read
 # zarr_group is whatever object your zarr library uses for group access.
-ome_multiscale = zarr_group.attrs["multiscales"][0]
-multiscale = Multiscale.from_ome_zarr(ome_multiscale, shape_source=zarr_group)
+ome_multiscale_dict = zarr_group.attrs["multiscales"][0]
+multiscale = Multiscale.from_ome_zarr(ome_multiscale_dict, shape_source=zarr_group)
 
-for scale_key, scale in multiscale.items():
-    print(scale.to_display_string(scale_key))
+# Do stuff
 
-zarr_group.attrs["ome"]["multiscales"] = [
-    multiscale.to_ome_zarr(version="0.5", axis_types="infer")
-]
+# Write
+processed_zarr_group.attrs["ome"] = {
+    "version": "0.5",
+    "multiscales": [processed_multiscale.to_ome_zarr(version="0.5", axis_types="infer")]
+}
 ```
 
-### What you still need to know about OME-Zarr
+What you still need to know about OME-Zarr:
 
 The clearscale `Multiscale` reflects a single multiscale object.
-Most OME-Zarr versions store a *list* of multiscale definitions in the zarr metadata:
+All OME-Zarr versions store a *list* of multiscale definitions in the zarr metadata, and it is stored under a different attrs-key in different versions:
 
 ```python
 # OME-Zarr v0.1 to v0.4
@@ -305,10 +306,14 @@ ome = zarr_group.attrs["ome"]["multiscales"]
 assert isinstance(ome, list)
 ```
 
+This is why the other examples in this documentation don't just do `zarr_group.attrs = Multiscale.to_ome_zarr(...)`.
+
 So to read OME-Zarr from some zarr group, your code needs to do something like:
 
 ```python
 from clearscale import Multiscale
+
+# 1. Discover the "multiscales" list
 try:
     ome = zarr_group.attrs["ome"]["multiscales"]
 except KeyError:
@@ -317,6 +322,8 @@ except KeyError:
     except KeyError as e:
         raise ValueError("No multiscale metadata found in zarr group")
 
+# 2. Convert all entries of the "multiscales" list
+# (There will practically never be more than one)
 valid_multiscales = []
 for ome_ms in ome:
     try:
@@ -327,6 +334,8 @@ for ome_ms in ome:
 if not valid_multiscales:
     raise ValueError("Multiscale metadata in this zarr group was all invalid")
 
+# 3. Handle the off-chance that there is more than one for some reason.
+# (You're supposed to let the user choose)
 if len(valid_multiscales) > 1:
     final_ms = let_user_choose_multiscale(valid_multiscales)
 else:
@@ -341,12 +350,24 @@ Likewise, when writing OME-Zarr metadata, you need to make sure that
 
 ```python
 ome_ms = ms.to_ome_zarr(version="0.4")
-zarr_group.attrs = {"multiscales": [ome_ms]}
+zarr_group.attrs = {
+    "multiscales": [ome_ms]
+}
 # Note: Actual data has to be written in zarr format v2 for OME-Zarr 0.4
 
 ome_ms = ms.to_ome_zarr(version="0.5")
-zarr_group.attrs = {"ome": {"version": "0.5", "multiscales": [ome_ms]}}
+zarr_group.attrs = {
+    "ome": {
+        "version": "0.5", 
+        "multiscales": [ome_ms]
+    }
+}
 
 ome_ms = ms.to_ome_zarr(version="0.6.dev4")
-zarr_group.attrs = {"ome": {"version": "0.6.dev4", "multiscales": [ome_ms]}}
+zarr_group.attrs = {
+    "ome": {
+        "version": "0.6.dev4", 
+        "multiscales": [ome_ms]
+    }
+}
 ```
