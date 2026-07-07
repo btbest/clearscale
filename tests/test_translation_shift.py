@@ -174,18 +174,14 @@ def test_detect_translation_shift_rejects_invalid_scaling_function_outputs(scali
 
 
 def test_ilastik_op_resize_is_half_pixel_space_preserving():
-    try:
-        from lazyflow.operators.opResize import OpResize
-        from lazyflow.graph import Graph
-    except ImportError:
-        pytest.skip("lazyflow not available")
-
+    op_resize = pytest.importorskip("lazyflow.operators.opResize")
+    graph = pytest.importorskip("lazyflow.graph")
     vigra = pytest.importorskip("vigra")
     np = pytest.importorskip("numpy")
 
     def resize_with_op(x):
-        op_scale = OpResize(
-            graph=Graph(),
+        op_scale = op_resize.OpResize(
+            graph=graph.Graph(),
             RawImage=vigra.taggedView(np.asarray(x), "x"),
             TargetShape=(327,),
             InterpolationOrder=1,

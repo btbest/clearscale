@@ -85,7 +85,7 @@ def first_value_decimation(base: "Scale", target: "Scale") -> "Translation":
     return Translation.identity(base.shape.keys())
 
 
-known_shift_functions: Tuple[TranslationShiftFunction] = (
+known_shift_functions: Tuple[TranslationShiftFunction, ...] = (
     half_pixel_space_preservation,
     discrete_bin_center,
     first_value_decimation,

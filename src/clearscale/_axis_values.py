@@ -2,44 +2,55 @@ import math
 import numbers
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from collections.abc import Mapping as ABCMapping
+from collections.abc import Collection, Iterator, Mapping as ABCMapping
 from types import NotImplementedType
 from typing import (
+    Any,
     Mapping,
     Generic,
+    Protocol,
     TypeVar,
     Union,
-    Container,
-    Sequence,
     Callable,
     Optional,
     List,
     Literal,
-    TYPE_CHECKING,
     Hashable,
 )
 
-AxisKey = TypeVar("AxisKey", bound=str)
+AxisKey = Hashable
+AxisKeyT = TypeVar("AxisKeyT", bound=AxisKey)
+AxisKeyT_co = TypeVar("AxisKeyT_co", bound=AxisKey, covariant=True)
 AxisMappedHashable = TypeVar("AxisMappedHashable", bound=Hashable)
 AxisMappedPrimitive = TypeVar("AxisMappedPrimitive", int, float, str)
-Axes = Union[Container[AxisKey], str]
-OrderedAxes = Sequence[AxisKey]
-FactorLike = Union["Factor", "Shape", Mapping[AxisKey, int], Mapping[AxisKey, float]]
-ShapeLike = Union["Shape", Mapping[AxisKey, int]]
+Axes = Union[Collection[AxisKey], str]
+Scalar = Union[int, float, numbers.Real]
+ShapeLike = Union["Shape", Mapping[AxisKeyT, int]]
 RoundingMethod = Union[Literal["ceil"], Literal["floor"], Literal["round"], Callable[[float], int]]
-
-if TYPE_CHECKING:
-    try:
-        from typing import Self  # py 3.11+
-    except ImportError:
-        try:
-            from typing_extensions import Self  # py 3.10 + optional dep
-        except ImportError:
-            _Self = TypeVar("_Self")
-            Self = _Self
+_AxisMappingSelf = TypeVar("_AxisMappingSelf", bound="_AxisMapping[Any, Any]")
+_AxisValuesSelf = TypeVar("_AxisValuesSelf", bound="_AxisValues[Any, Any]")
 
 
-class _AxisMapping(ABCMapping[AxisKey, AxisMappedHashable], Generic[AxisKey, AxisMappedHashable]):
+class _Ordered(Protocol[AxisKeyT_co]):
+    """Defined order (unlike Iterable, Collection), but not necessarily indexable (unlike Sequence).
+    To match e.g. strings, but also odict_keys and of course _AxisMapping"""
+
+    def __iter__(self) -> Iterator[AxisKeyT_co]: ...
+    def __len__(self) -> int: ...
+
+
+OrderedAxesT = _Ordered[AxisKeyT]
+OrderedAxes = _Ordered[AxisKey]
+
+
+def _axis_in(axis: AxisKey, axes: Axes) -> bool:
+    """Required because `axis` can be any Hashable, and e.g. `my_data_obj in 'tczyx'` raises TypeError"""
+    if isinstance(axes, str):
+        return isinstance(axis, str) and axis in axes
+    return axis in axes
+
+
+class _AxisMapping(ABCMapping[AxisKeyT, AxisMappedHashable], Generic[AxisKeyT, AxisMappedHashable]):
     """
     Base class for "tagged dictionaries" that map axis keys to values (like shape, resolution, unit).
     Instantiation and usage of the subclasses should work pretty much like usual dicts, but with
@@ -53,7 +64,7 @@ class _AxisMapping(ABCMapping[AxisKey, AxisMappedHashable], Generic[AxisKey, Axi
     """
 
     def __init__(self, *args, **kwargs):
-        self._mapping = OrderedDict(*args, **kwargs)
+        self._mapping: OrderedDict[AxisKeyT, AxisMappedHashable] = OrderedDict(*args, **kwargs)
         if not self._mapping:
             raise ValueError(f"Empty {self.__class__.__name__}. Received: {args=}, {kwargs=}")
         if None in self._mapping.keys():
@@ -65,13 +76,13 @@ class _AxisMapping(ABCMapping[AxisKey, AxisMappedHashable], Generic[AxisKey, Axi
         map_substr = self._mapping.__repr__()[len(type(self._mapping).__name__) :]
         return str(self.__class__.__name__) + map_substr
 
-    def __getitem__(self, key: AxisKey):
+    def __getitem__(self, key: AxisKeyT) -> AxisMappedHashable:
         return self._mapping[key]
 
-    def __contains__(self, key: AxisKey):
+    def __contains__(self, key: object) -> bool:
         return key in self._mapping
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[AxisKeyT]:
         return iter(self._mapping)
 
     def __len__(self):
@@ -96,7 +107,7 @@ class _AxisMapping(ABCMapping[AxisKey, AxisMappedHashable], Generic[AxisKey, Axi
             return self._mapping == other
         return False
 
-    def copy(self):
+    def copy(self: _AxisMappingSelf) -> _AxisMappingSelf:
         return self.__class__(self._mapping)
 
     def to_tuple(self):
@@ -106,31 +117,29 @@ class _AxisMapping(ABCMapping[AxisKey, AxisMappedHashable], Generic[AxisKey, Axi
         return list(self.values())
 
 
-class _AxisValues(ABC, _AxisMapping[AxisKey, AxisMappedPrimitive], Generic[AxisKey, AxisMappedPrimitive]):
-
-    @property
+class _AxisValues(ABC, _AxisMapping[AxisKeyT, AxisMappedPrimitive], Generic[AxisKeyT, AxisMappedPrimitive]):
+    @classmethod
     @abstractmethod
-    def _default(self):
-        """Subclasses should provide the Class._default property.
-        Default value for axes where no value is provided."""
-        ...
+    def _default(cls) -> AxisMappedPrimitive: ...
+
+    """Subclasses provide the default value for axes where no value is provided."""
 
     @classmethod
-    def fromkeys(cls, keys: OrderedAxes) -> "Self":
-        return cls(zip(keys, [cls._default] * len(keys)))
+    def fromkeys(cls: type[_AxisValuesSelf], keys: OrderedAxesT) -> _AxisValuesSelf:
+        return cls(zip(keys, [cls._default()] * len(keys)))
 
     def is_default(self) -> bool:
         """Check if all values in this metadata are the default value."""
-        return all(v == self._default for v in self.values())
+        return all(v == self._default() for v in self.values())
 
-    def with_axes(self, axes: OrderedAxes) -> "Self":
+    def with_axes(self: _AxisValuesSelf, axes: OrderedAxesT) -> _AxisValuesSelf:
         """Order like axes. Drop axes, or insert new axes with default value if necessary."""
         if not axes:
             raise ValueError(f"Cannot create empty {self.__class__.__name__}. Attempted reorder to: '{axes}'")
-        reordered_items = [(a, self[a] if a in self else self._default) for a in axes]
+        reordered_items = [(a, self[a] if a in self else self._default()) for a in axes]
         return self.__class__(reordered_items)
 
-    def with_axes_order(self, axes: OrderedAxes) -> "Self":
+    def with_axes_order(self: _AxisValuesSelf, axes: OrderedAxesT) -> _AxisValuesSelf:
         """Order like given axes (but no new insertions)."""
         reordered_items = [(a, self[a]) for a in axes if a in self]
         if not reordered_items:
@@ -140,9 +149,9 @@ class _AxisValues(ABC, _AxisMapping[AxisKey, AxisMappedPrimitive], Generic[AxisK
             )
         return self.__class__(reordered_items)
 
-    def without_axes_except(self, axes: Axes) -> "Self":
+    def without_axes_except(self: _AxisValuesSelf, axes: Axes) -> _AxisValuesSelf:
         """Keep only given axes (no reordering)."""
-        kept_items = [(a, self[a]) for a in self if a in axes]
+        kept_items = [(a, self[a]) for a in self if _axis_in(a, axes)]
         if not kept_items:
             raise ValueError(
                 f"Cannot create empty {self.__class__.__name__}. "
@@ -150,46 +159,46 @@ class _AxisValues(ABC, _AxisMapping[AxisKey, AxisMappedPrimitive], Generic[AxisK
             )
         return self.__class__(kept_items)
 
-    def without_axes(self, axes: Axes) -> "Self":
+    def without_axes(self: _AxisValuesSelf, axes: Axes) -> _AxisValuesSelf:
         """Drop given axes."""
-        kept_items = [(a, self[a]) for a in self if a not in axes]
+        kept_items = [(a, self[a]) for a in self if not _axis_in(a, axes)]
         if not kept_items:
             raise ValueError(f"Cannot create empty {self.__class__.__name__}. Removing {axes} would leave no axes.")
         return self.__class__(kept_items)
 
-    def without_default_values(self) -> "Self":
+    def without_default_values(self: _AxisValuesSelf) -> _AxisValuesSelf:
         """Drop axes with default value"""
         if self.is_default():
             raise ValueError(
                 f"Cannot create empty {self.__class__.__name__}. Removing all defaults would leave no axes."
             )
-        return self.without_axes(tuple(a for a in self if self[a] == self._default))
+        return self.without_axes(tuple(a for a in self if self[a] == self._default()))
 
-    def with_default(self, axes: Axes) -> "Self":
+    def with_default(self: _AxisValuesSelf, axes: Axes) -> _AxisValuesSelf:
         """
         Reset the values for `axes` to the type's default value, keeping the rest unchanged.
 
-        Equivalent to pandas.DataFrame.mask(self in axes, other=self._default).
+        Equivalent to pandas.DataFrame.mask(self in axes, other=self._default()).
         """
-        reset_items = [(a, self._default if a in axes else self[a]) for a in self]
+        reset_items = [(a, self._default() if _axis_in(a, axes) else self[a]) for a in self]
         return self.__class__(reset_items)
 
-    def with_default_except(self, axes: Axes) -> "Self":
+    def with_default_except(self: _AxisValuesSelf, axes: Axes) -> _AxisValuesSelf:
         """
         Keep the values for `axes` and reset the remaining values to the type's default value.
 
-        Equivalent to pandas.DataFrame.where(self in axes, other=self._default).
+        Equivalent to pandas.DataFrame.where(self in axes, other=self._default()).
         """
-        keep_items = [(a, self[a] if a in axes else self._default) for a in self]
+        keep_items = [(a, self[a] if _axis_in(a, axes) else self._default()) for a in self]
         return self.__class__(keep_items)
 
-    def with_values(self, other: Mapping[AxisKey, Union[numbers.Real, str]], axes: Axes):
+    def with_values(self, other: Mapping[AxisKeyT, Union[Scalar, str]], axes: Axes):
         if not axes:
             return self.__class__(self)
         replaced_items = []
         for a in self:
             new_value = self[a]
-            if a in axes and a in other and other[a] is not None:
+            if _axis_in(a, axes) and a in other and other[a] is not None:
                 new_value = other[a]
             if type(self[a]) != type(new_value):
                 if isinstance(new_value, numbers.Integral) and isinstance(self[a], float):
@@ -262,9 +271,11 @@ class Factor(_AxisFloats):
     ```
     """
 
-    _default = 1.0
+    @classmethod
+    def _default(cls) -> float:
+        return 1.0
 
-    def with_axes(self, axes: OrderedAxes) -> "Self":
+    def with_axes(self, axes: OrderedAxes) -> "Factor":
         """
         Reorder to `axes`.
 
@@ -289,7 +300,7 @@ class Factor(_AxisFloats):
                 raise ValueError(f"Scaling factor cannot be 0 or negative (got {value} for axis '{axis}').")
 
     @classmethod
-    def uniform(cls, axes: OrderedAxes, factor: numbers.Real) -> "Factor":
+    def uniform(cls, axes: OrderedAxes, factor: Scalar) -> "Factor":
         """Create a new Scaling with `axes` and all values being `factor`."""
         return Factor(zip(axes, [factor] * len(axes)))
 
@@ -310,7 +321,7 @@ class Factor(_AxisFloats):
         Note: Factors act as divisors for shape (e.g. 1024 / 0.5 = 2048)."""
         return math.prod(self.values()) < 1
 
-    def inverted(self) -> "Self":
+    def inverted(self) -> "Factor":
         """Axis-wise 1/factor."""
         inverted_items = [(a, 1 / self[a]) for a in self]
         return self.__class__(inverted_items)
@@ -329,11 +340,11 @@ class Factor(_AxisFloats):
         _require_identical_axes(self, other)
         return Factor((a, self[a] / other[a]) for a in self)
 
-    def with_identity(self, axes: Axes) -> "Self":
+    def with_identity(self, axes: Axes) -> "Factor":
         """Reset the values for `axes` to 1.0."""
         return super().with_default(axes)
 
-    def with_identity_except(self, axes: Axes) -> "Self":
+    def with_identity_except(self, axes: Axes) -> "Factor":
         """Reset the values for all axes except `axes` to 1.0."""
         return super().with_default_except(axes)
 
@@ -351,7 +362,9 @@ class PixelSize(_AxisFloats):
     The values are in "units (e.g. nanometer) per pixel".
     """
 
-    _default = 1.0
+    @classmethod
+    def _default(cls) -> float:
+        return 1.0
 
     @classmethod
     def identity(cls, axes: OrderedAxes) -> "PixelSize":
@@ -359,13 +372,14 @@ class PixelSize(_AxisFloats):
         return super().fromkeys(axes)
 
     @classmethod
-    def from_vigra(cls, axistags: "vigra.AxisTags") -> "Self":
+    def from_vigra(cls, vigra_axistags: Any) -> "PixelSize":
+        """Extract AxisInfo.resolution from the provided `vigra.AxisTags`"""
         vigra_default_resolution = 0.0
         axes = []
         resolutions = []
-        for tag in axistags:
+        for tag in vigra_axistags:
             axes.append(tag.key)
-            resolutions.append(tag.resolution if tag.resolution != vigra_default_resolution else cls._default)
+            resolutions.append(tag.resolution if tag.resolution != vigra_default_resolution else cls._default())
         return cls(zip(axes, resolutions))
 
     def __init__(self, *args, **kwargs):
@@ -378,35 +392,35 @@ class PixelSize(_AxisFloats):
         """True if this PixelSize is the unit size (1.0 along all axes)."""
         return super().is_default()
 
-    def with_identity(self, axes: Axes) -> "Self":
+    def with_identity(self, axes: Axes) -> "PixelSize":
         """Reset the values for `axes` to 1.0."""
         return super().with_default(axes)
 
-    def with_identity_except(self, axes: Axes) -> "Self":
+    def with_identity_except(self, axes: Axes) -> "PixelSize":
         """Reset the values for all axes except `axes` to 1.0."""
         return super().with_default_except(axes)
 
-    def to_vigra(self, axistags: Optional["vigra.AxisTags"]) -> "vigra.AxisTags":
+    def to_vigra(self, axistags: Optional[Any]) -> Any:
         """
-        Creates or modifies vigra.AxisTags with the values in this Scaling/Resolution.
+        Creates or modifies `vigra.AxisTags` with the values in this PixelSize.
         :param axistags: (Optional) Existing AxisTags to modify.
-            Only transfers values for axes shared between the AxisTags and this Scaling/Resolution.
+            Only transfers values for axes shared between the AxisTags and this PixelSize.
         :return: Returns the newly created or the modified AxisTags.
         """
         try:
-            import vigra
+            import vigra  # pyright: ignore
         except ImportError as e:
             raise ImportError(
                 'This function requires the package "vigra". '
                 "Please install it using e.g. `conda install -c conda-forge vigra`"
             ) from e
-        tags = axistags if axistags else vigra.defaultAxistags("".join(self.keys()))
+        tags = axistags if axistags else vigra.defaultAxistags("".join(str(axis) for axis in self.keys()))
         for tag in tags:
-            if tag.key in self and self[tag.key] != self._default:
+            if tag.key in self and self[tag.key] != self._default():
                 tags.setResolution(tag.key, self[tag.key])
         return tags
 
-    def scaled_by(self, factor: Union[Factor, Mapping[AxisKey, float], numbers.Real]) -> "PixelSize":
+    def scaled_by(self, factor: Union[Factor, Mapping[AxisKey, float], Scalar]) -> "PixelSize":
         """
         Scale this PixelSize by factor to obtain a scaled PixelSize.
         This is an axis-wise operation:
@@ -415,9 +429,11 @@ class PixelSize(_AxisFloats):
         - Extra axes in `factor` are rejected
         Note if passing scalar: factor 2.0 means double pixel size = half resolution.
         """
-        if isinstance(factor, numbers.Real):
-            factor = Factor.uniform(self, factor)
-        elif not isinstance(factor, Factor):
+        if isinstance(factor, Factor):
+            pass
+        elif isinstance(factor, numbers.Real):
+            factor = Factor.uniform(self, float(factor))
+        else:
             factor = Factor(factor)
         base_axes = set(self.keys())
         factor_axes = set(factor.keys())
@@ -425,7 +441,7 @@ class PixelSize(_AxisFloats):
         if invalid_axes:
             raise ValueError(
                 f"Attempted to scale axes with no base pixel size: "
-                f"{sorted(invalid_axes)} not present in {sorted(base_axes)}"
+                f"{sorted(invalid_axes, key=str)} not present in {sorted(base_axes, key=str)}"
             )
         reordered = factor.with_axes(self)
         scaled_items = [(a, reordered[a] * self[a]) for a in self]
@@ -450,7 +466,9 @@ class PixelSize(_AxisFloats):
 class Translation(_AxisFloats):
     """Describes a shift in physical units."""
 
-    _default = 0.0
+    @classmethod
+    def _default(cls) -> float:
+        return 0.0
 
     def with_axes(self, axes: OrderedAxes) -> "Translation":
         """
@@ -509,7 +527,9 @@ class Unit(_AxisValues[AxisKey, str]):
     Example: {"t": "seconds", "x": "nm, "y": "nm, "c": ""}.
     """
 
-    _default = ""
+    @classmethod
+    def _default(cls) -> str:
+        return ""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -517,7 +537,7 @@ class Unit(_AxisValues[AxisKey, str]):
             if not isinstance(value, str):
                 raise TypeError(f"All values must be strings. Got {type(value).__name__} for axis '{axis}'.")
 
-    def with_axes(self, axes: OrderedAxes) -> "Self":
+    def with_axes(self, axes: OrderedAxes) -> "Unit":
         """
         Reorder to `axes`.
 
@@ -541,7 +561,9 @@ class PixelOffset(_AxisValues[AxisKey, int]):
     Describes the number of pixels of distance from some reference point to another.
     """
 
-    _default = 0
+    @classmethod
+    def _default(cls) -> int:
+        return 0
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -594,7 +616,9 @@ class Shape(_AxisValues[AxisKey, int]):
     Describes the number of pixels in the image.
     """
 
-    _default = 1
+    @classmethod
+    def _default(cls) -> int:
+        return 1
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -606,10 +630,10 @@ class Shape(_AxisValues[AxisKey, int]):
             self._mapping[axis] = int(value)
 
     @classmethod
-    def all_singletons(cls, axes: OrderedAxes):
+    def all_singletons(cls, axes: OrderedAxes) -> "Shape":
         return super().fromkeys(axes)
 
-    def with_axes(self, axes: OrderedAxes) -> "Self":
+    def with_axes(self, axes: OrderedAxes) -> "Shape":
         """
         Reorder to `axes`.
 
@@ -622,7 +646,7 @@ class Shape(_AxisValues[AxisKey, int]):
         """
         return super().with_axes(axes)
 
-    def with_ones(self, axes: Axes) -> "Self":
+    def with_ones(self, axes: Axes) -> "Shape":
         """Reset the values for `axes` to 1."""
         return super().with_default(axes)
 
@@ -643,7 +667,7 @@ class Shape(_AxisValues[AxisKey, int]):
 
         :param axes: (Optional) Return subset of `axes` along which this Shape is singleton."""
         axes = axes if axes is not None else self.keys()
-        return [a for a in axes if a in self and self[a] != self._default]
+        return [a for a in axes if a in self and self[a] != self._default()]
 
     def scaled_by(self, factor: Union[Factor, Mapping[AxisKey, float]], *, rounding: RoundingMethod) -> "Shape":
         """
@@ -665,7 +689,7 @@ class Shape(_AxisValues[AxisKey, int]):
             Rescale a single dimension of a shape.
             Floor-round to match behavior of OpResize, and ensure minimum size is 1.
             """
-            return max(rounding(s / f), self._default)
+            return max(rounding(s / f), self._default())
 
         scaled_shape = self.__class__([(a, _rescale_size(size, factor[a])) for a, size in self.items()])
         return scaled_shape

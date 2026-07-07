@@ -43,8 +43,8 @@ class Scene:
         return len(self._internal_graph.unresolved_transforms) == 0
 
     @functools.cached_property
-    def unresolved_paths(self) -> set[RelativePath]:
-        paths = []
+    def unresolved_paths(self) -> List[RelativePath]:
+        paths = []  # Order might matter to the consumer
         seen_paths = set()
         for t in self._internal_graph.unresolved_transforms:
             for endpoint in (t.source, t.target):
@@ -98,6 +98,7 @@ class Scene:
     ) -> Dict:
         coordinate_system_dicts = []
         for ref in self._internal_graph.system_refs:
+            assert ref.owner is not None, "Dev error: all refs to CoordinateSystems must be owned"
             coordinate_system_dicts.append(ref.owner.to_ome_zarr(name=ref.name, version=version))
 
         all_paths = dict(self._multiscale_paths)
@@ -177,6 +178,7 @@ class Scene:
             multiscale = multiscales_by_path.get(old_ref.path)
             if multiscale is None:
                 continue
+            assert new_ref is not None, f"Dev error: previously not-None {old_ref!r} became None {new_ref!r}"
             if isinstance(new_ref.owner, Multiscale) and new_ref.owner is multiscale:
                 resolved_paths[old_ref.path] = multiscale
         return resolved_paths

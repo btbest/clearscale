@@ -52,7 +52,7 @@ def test_pixel_size_mul_factor_rejects_extra_factor_axes():
     factor = Factor([("y", 2.0), ("x", 2.0), ("z", 2.0)])
 
     with pytest.raises(ValueError, match="Attempted to scale axes with no base pixel size"):
-        factor * pixel_size
+        _ = factor * pixel_size
 
 
 def test_factor_mul_pixel_size_rejects_extra_factor_axes():
@@ -60,7 +60,7 @@ def test_factor_mul_pixel_size_rejects_extra_factor_axes():
     factor = Factor([("y", 2.0), ("x", 2.0), ("z", 2.0)])
 
     with pytest.raises(ValueError, match="Attempted to scale axes with no base pixel size"):
-        pixel_size * factor
+        _ = pixel_size * factor
 
 
 def test_pixel_size_div_factor_rejects_extra_factor_axes():
@@ -68,7 +68,7 @@ def test_pixel_size_div_factor_rejects_extra_factor_axes():
     factor = Factor([("y", 2.0), ("x", 2.0), ("z", 2.0)])
 
     with pytest.raises(ValueError, match="Attempted to scale axes with no base pixel size"):
-        pixel_size / factor
+        _ = pixel_size / factor
 
 
 def test_pixel_size_divides_pixel_size_to_factor():
@@ -109,7 +109,7 @@ def test_offset_mul_pixel_size_multiplication_requires_offset_axes():
     pixel_size = PixelSize(y=0.5)
 
     with pytest.raises(ValueError, match="must contain all axes"):
-        offset * pixel_size
+        _ = offset * pixel_size
 
 
 def test_pixel_size_mul_offset_multiplication_requires_offset_axes():
@@ -117,7 +117,7 @@ def test_pixel_size_mul_offset_multiplication_requires_offset_axes():
     pixel_size = PixelSize(y=0.5)
 
     with pytest.raises(ValueError, match="must contain all axes"):
-        pixel_size * offset
+        _ = pixel_size * offset
 
 
 def test_shape_divides_shape_to_factor_using_scaling_to_semantics():
@@ -206,20 +206,20 @@ def test_implemented_dunders_return_not_implemented_for_unsupported_operands():
 @pytest.mark.parametrize(
     "operation",
     [
-        lambda: Shape(y=4) * Factor(y=2.0),
-        lambda: Shape(y=4) / Factor(y=2.0),
-        lambda: Translation(y=1.0) / PixelSize(y=1.0),
-        lambda: Shape(y=4) * PixelSize(y=1.0),
-        lambda: PixelOffset(y=1) + Shape(y=1),
-        lambda: Shape(y=1) + PixelOffset(y=1),
-        lambda: Factor(y=1.0) + Factor(y=1.0),
-        lambda: Factor(y=1.0) - Factor(y=1.0),
-        lambda: PixelSize(y=1.0) + PixelSize(y=1.0),
-        lambda: PixelSize(y=1.0) - PixelSize(y=1.0),
-        lambda: Shape(y=1) + Shape(y=1),
-        lambda: Shape(y=1) - Shape(y=1),
-        lambda: Translation(y=1.0) * Factor(y=1.0),
-        lambda: PixelOffset(y=1) / Factor(y=1.0),
+        lambda: Shape(y=4) * Factor(y=2.0),  # type: ignore[operator]
+        lambda: Shape(y=4) / Factor(y=2.0),  # type: ignore[operator]
+        lambda: Translation(y=1.0) / PixelSize(y=1.0),  # type: ignore[operator]
+        lambda: Shape(y=4) * PixelSize(y=1.0),  # type: ignore[operator]
+        lambda: PixelOffset(y=1) + Shape(y=1),  # type: ignore[operator]
+        lambda: Shape(y=1) + PixelOffset(y=1),  # type: ignore[operator]
+        lambda: Factor(y=1.0) + Factor(y=1.0),  # type: ignore[operator]
+        lambda: Factor(y=1.0) - Factor(y=1.0),  # type: ignore[operator]
+        lambda: PixelSize(y=1.0) + PixelSize(y=1.0),  # type: ignore[operator]
+        lambda: PixelSize(y=1.0) - PixelSize(y=1.0),  # type: ignore[operator]
+        lambda: Shape(y=1) + Shape(y=1),  # type: ignore[operator]
+        lambda: Shape(y=1) - Shape(y=1),  # type: ignore[operator]
+        lambda: Translation(y=1.0) * Factor(y=1.0),  # type: ignore[operator]
+        lambda: PixelOffset(y=1) / Factor(y=1.0),  # type: ignore[operator]
     ],
 )
 def test_unsupported_arithmetic_raises_type_error(operation):

@@ -19,7 +19,6 @@ from typing import (
     Literal,
     Dict,
     Any,
-    TYPE_CHECKING,
     Hashable,
 )
 
@@ -34,7 +33,6 @@ from clearscale._axis_values import (
     Axes,
     RoundingMethod,
     OrderedAxes,
-    _AxisValues,
     AxisKey,
 )
 from clearscale._transforms import (
@@ -48,9 +46,11 @@ from clearscale._transforms import (
 )
 from clearscale._services import ome_zarr, precomputed
 
-ScaleKey = TypeVar("ScaleKey", bound=str)
+ScaleKey = str
 ValueType = TypeVar("ValueType", Shape, Factor, "Scale")
 AxisValuesType = TypeVar("AxisValuesType", Shape, Factor)
+_ScaleMappingSelf = TypeVar("_ScaleMappingSelf", bound="_ScaleMapping[Any]")
+_ScaledAxisValuesSelf = TypeVar("_ScaledAxisValuesSelf", bound="_ScaledAxisValues[Any]")
 DEFAULT_NAME_PATTERN = "s{}"
 
 TranslationShiftFunction = Callable[["Scale", "Scale"], "Translation"]
@@ -60,16 +60,6 @@ target_scale: the new scale being created (with 0 translation)
 Returns: target_scale's translation
 """
 
-if TYPE_CHECKING:
-    try:
-        from typing import Self  # py 3.11+
-    except ImportError:
-        try:
-            from typing_extensions import Self  # py 3.10 + optional dep
-        except ImportError:
-            _Self = TypeVar("_Self")
-            Self = _Self
-
 
 class DuplicatePolicy(str, Enum):
     ERROR = "error"
@@ -78,39 +68,36 @@ class DuplicatePolicy(str, Enum):
     KEEP_LAST = "keep_last"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class Scale:
     shape: Shape
-    pixel_size: Optional[PixelSize] = None
-    unit: Optional[Unit] = None
-    translation: Optional[Translation] = None
+    pixel_size: PixelSize
+    unit: Unit
+    translation: Translation
 
-    def __post_init__(self):
-        object.__setattr__(self, "shape", Shape(self.shape))
-        if self.pixel_size is None:
-            object.__setattr__(self, "pixel_size", PixelSize.fromkeys(self.shape))
-        else:
-            object.__setattr__(self, "pixel_size", PixelSize(self.pixel_size))
-        if self.unit is None:
-            object.__setattr__(self, "unit", Unit.fromkeys(self.shape))
-        else:
-            object.__setattr__(self, "unit", Unit(self.unit))
-        if self.translation is None:
-            object.__setattr__(self, "translation", Translation.fromkeys(self.shape))
-        else:
-            object.__setattr__(self, "translation", Translation(self.translation))
-        if (
-            self.shape.keys() != self.pixel_size.keys()
-            or self.shape.keys() != self.unit.keys()
-            or self.shape.keys() != self.translation.keys()
-        ):
+    def __init__(
+        self,
+        shape: ShapeLike,
+        pixel_size: Optional[Union[PixelSize, Mapping[AxisKey, float]]] = None,
+        unit: Optional[Union[Unit, Mapping[AxisKey, str]]] = None,
+        translation: Optional[Union[Translation, Mapping[AxisKey, float]]] = None,
+    ):
+        shape = Shape(shape)
+        pixel_size = PixelSize.fromkeys(shape) if pixel_size is None else PixelSize(pixel_size)
+        unit = Unit.fromkeys(shape) if unit is None else Unit(unit)
+        translation = Translation.fromkeys(shape) if translation is None else Translation(translation)
+        if shape.keys() != pixel_size.keys() or shape.keys() != unit.keys() or shape.keys() != translation.keys():
             raise ValueError(
                 f"Tried to set up invalid scale: Axiskeys differ "
-                f"(shape={list(self.shape.keys())}, "
-                f"pixel_size={list(self.pixel_size.keys())}, "
-                f"translation={list(self.translation.keys())}, "
-                f"unit={list(self.unit.keys())})"
+                f"(shape={list(shape.keys())}, "
+                f"pixel_size={list(pixel_size.keys())}, "
+                f"translation={list(translation.keys())}, "
+                f"unit={list(unit.keys())})"
             )
+        object.__setattr__(self, "shape", shape)
+        object.__setattr__(self, "pixel_size", pixel_size)
+        object.__setattr__(self, "unit", unit)
+        object.__setattr__(self, "translation", translation)
 
     def with_axes(self, axes: OrderedAxes) -> "Scale":
         """Build a Scale with all properties produced by their respective `.with_axes`."""
@@ -146,7 +133,7 @@ class Scale:
         return f"{name_and_shape}{pixel_size}"
 
 
-class _ScaleMapping(ABC, ABCMapping[ScaleKey, ValueType], Generic[ScaleKey, ValueType]):
+class _ScaleMapping(ABC, ABCMapping[ScaleKey, ValueType], Generic[ValueType]):
     """Common base class for Multiscale, BlueprintShapes and BlueprintFactors"""
 
     def __init__(self, *args, **kwargs):
@@ -165,7 +152,7 @@ class _ScaleMapping(ABC, ABCMapping[ScaleKey, ValueType], Generic[ScaleKey, Valu
             raise KeyError(f"No such scale: '{key}' (available: {list(self.keys())})")
         return self._mapping[key]
 
-    def __contains__(self, key: ScaleKey):
+    def __contains__(self, key: object) -> bool:
         return key in self._mapping
 
     def __iter__(self):
@@ -196,17 +183,17 @@ class _ScaleMapping(ABC, ABCMapping[ScaleKey, ValueType], Generic[ScaleKey, Valu
             return self._mapping == other
         return False
 
-    def copy(self):
+    def copy(self: _ScaleMappingSelf) -> _ScaleMappingSelf:
         return self.__class__(self._mapping)
 
-    def filter_items(self, keep_func: Callable[[ScaleKey, ValueType], bool]) -> "Self":
+    def filter_items(self: _ScaleMappingSelf, keep_func: Callable[[ScaleKey, ValueType], bool]) -> _ScaleMappingSelf:
         items = [(k, v) for k, v in self.items() if keep_func(k, v)]
         return self.__class__(items)
 
     def with_keys(
-        self,
-        keys_pattern_or_func: Union[Sequence[ScaleKey], str, Callable[[int, ScaleKey, "Scale"], ScaleKey]],
-    ) -> "Self":
+        self: _ScaleMappingSelf,
+        keys_pattern_or_func: Union[Sequence[ScaleKey], str, Callable[[int, ScaleKey, ValueType], ScaleKey]],
+    ) -> _ScaleMappingSelf:
         """
         Assign new scale keys using one of:
         - a sequence of new scale keys (one per current scale, unique)
@@ -234,7 +221,7 @@ class _ScaleMapping(ABC, ABCMapping[ScaleKey, ValueType], Generic[ScaleKey, Valu
                 raise ValueError(f"All new scale keys must be unique. Received: {new_keys}")
             return self.__class__(zip(new_keys, self.values()))
 
-    def drop_before(self, key: ScaleKey, inclusive=False) -> "Self":
+    def drop_before(self: _ScaleMappingSelf, key: ScaleKey, inclusive=False) -> _ScaleMappingSelf:
         keys = list(self.keys())
         if key not in keys:
             raise KeyError(f"No such scale: '{key}' (available: {keys})")
@@ -274,7 +261,7 @@ class _ScaleMapping(ABC, ABCMapping[ScaleKey, ValueType], Generic[ScaleKey, Valu
         return True
 
 
-class _ScaledAxisValues(_ScaleMapping[str, AxisValuesType], Generic[AxisValuesType]):
+class _ScaledAxisValues(_ScaleMapping[AxisValuesType], Generic[AxisValuesType]):
     """Base class for BlueprintShapes and BlueprintFactors"""
 
     def __init__(self, *args, **kwargs):
@@ -292,21 +279,21 @@ class _ScaledAxisValues(_ScaleMapping[str, AxisValuesType], Generic[AxisValuesTy
                     f"All values must have the same axes. (Expected {axes}, received {v.keys()} for key '{k}')"
                 )
 
-    def to_dict(self) -> OrderedDict[ScaleKey, OrderedDict[AxisKey, Union[int, float]]]:
+    def to_dict(self) -> OrderedDict[str, OrderedDict[str, Union[int, float]]]:
         return OrderedDict([(scale_key, OrderedDict(axis_values)) for scale_key, axis_values in self.items()])
 
-    def _with_values(self, values: Sequence[_AxisValues]) -> "Self":
+    def _with_values(self: _ScaledAxisValuesSelf, values: Sequence[AxisValuesType]) -> _ScaledAxisValuesSelf:
         return self.__class__(zip(self.keys(), values))
 
-    def with_axes(self, axes: OrderedAxes) -> "Self":
+    def with_axes(self: _ScaledAxisValuesSelf, axes: OrderedAxes) -> _ScaledAxisValuesSelf:
         return self._with_values([value.with_axes(axes) for value in self.values()])
 
     @staticmethod
     def _resolve_duplicates(
-        raw_items: Iterable[Tuple[ScaleKey, _AxisValues]],
+        raw_items: Iterable[Tuple[ScaleKey, AxisValuesType]],
         on_duplicate: DuplicatePolicy,
         on_duplicate_prefer: Optional[ScaleKey],
-    ) -> List[Tuple[ScaleKey, _AxisValues]]:
+    ) -> List[Tuple[ScaleKey, AxisValuesType]]:
         """
         Ensure raw_items contains no duplicate values. Resolve duplicates according to on_duplicate:
         "error": Raise error if there are duplicates.
@@ -370,9 +357,8 @@ class BlueprintShapes(_ScaledAxisValues[Shape]):
         If no `source_key`, `target_shape` becomes the blueprint's base shape.
         All other shapes are rescaled from `target_shape` according to their relative factor to `source_key`
         """
-        if source_key is None:
-            source_key = next(iter(multiscale.keys()))
-        source_shape = multiscale[source_key].shape
+        resolved_source_key = source_key if source_key is not None else next(iter(multiscale.keys()))
+        source_shape = multiscale[resolved_source_key].shape
 
         factors = BlueprintFactors.from_multiscale(multiscale, reference=source_shape)
         if scaled_axes:
@@ -406,8 +392,7 @@ class BlueprintShapes(_ScaledAxisValues[Shape]):
         if not scaled_axes:
             return cls({name_pattern.format(0): base_shape})
 
-        if not shape_limit:
-            shape_limit = base_shape.with_ones(scaled_axes)
+        shape_limit = shape_limit or base_shape.with_ones(scaled_axes)
 
         cls._validate_shape_limit(base_shape, scaled_axes, shape_limit, max_levels, step)
         shape_limit = Shape(shape_limit).without_axes_except(base_shape)
@@ -607,12 +592,12 @@ class BlueprintFactors(_ScaledAxisValues[Factor]):
         translation_shift_func: Optional[TranslationShiftFunction] = None,
     ) -> "Multiscale":
         shapes = self.to_shapes(scale.shape, rounding=rounding)
-        return shapes.apply_to_scale(scale, translation_shift_func)
+        return shapes.apply_to_scale(scale, translation_shift_func=translation_shift_func)
 
-    def with_identity(self, axes: Axes) -> "Self":
+    def with_identity(self, axes: Axes) -> "BlueprintFactors":
         return self._with_values([factor.with_identity(axes) for factor in self.values()])
 
-    def with_identity_except(self, axes: Axes) -> "Self":
+    def with_identity_except(self, axes: Axes) -> "BlueprintFactors":
         return self._with_values([factor.with_identity_except(axes) for factor in self.values()])
 
 
@@ -622,7 +607,7 @@ def _random_multiscale_name(seed: int | str | None = None) -> str:
     return generate_random_animal_name(seed)
 
 
-class Multiscale(_ScaleMapping[str, Scale], TransformGraphNode):
+class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
     _transform_graph: TransformGraph
     """Transform graph that by default consists only of one isolated node: _intrinsic_ref."""
     _intrinsic_ref: CoordinateSystemRef[CoordinateSystem]
@@ -656,9 +641,10 @@ class Multiscale(_ScaleMapping[str, Scale], TransformGraphNode):
             self._transform_graph = self._make_single_system_graph()
             self._intrinsic_ref = next(iter(self._transform_graph.system_refs))
         else:
-            if _intrinsic_ref not in _transform_graph.all_system_refs:
+            transform_graph = _transform_graph or self._make_single_system_graph(_intrinsic_ref)
+            if _intrinsic_ref not in transform_graph.all_system_refs:
                 raise AssertionError("_intrinsic_ref must be inside _transform_graph")
-            self._transform_graph = _transform_graph or self._make_single_system_graph(_intrinsic_ref)
+            self._transform_graph = transform_graph
             self._intrinsic_ref = _intrinsic_ref
         zero_scale_axes_by_key = {}
         if _zero_scale_axes_by_key:
@@ -709,6 +695,7 @@ class Multiscale(_ScaleMapping[str, Scale], TransformGraphNode):
             transform_graph, intrinsic_system_ref, global_transforms = ome_zarr.multiscale_graph_from_legacy(
                 multiscale_dict, name=intrinsic_system_name
             )
+        assert intrinsic_system_ref.owner, "dev error: must reference intrinsic system"
         axis_keys = list(intrinsic_system_ref.owner.axes())
         unit = intrinsic_system_ref.owner.get_unit()
         datasets = multiscale_dict["datasets"]
@@ -806,12 +793,13 @@ class Multiscale(_ScaleMapping[str, Scale], TransformGraphNode):
             grouped[scale.shape].append(key)
         return {shape: tuple(keys) for shape, keys in grouped.items()}
 
-    def to_ome_zarr(
+    # Ignore narrowing of `version: str` to Literal (nicer to be explicit)
+    def to_ome_zarr(  # pyright: ignore[reportIncompatibleMethodOverride]
         self,
         *,
         version: Literal["0.4", "0.5", "0.6.dev4"],
         name: Optional[str] = None,
-        axis_types: Union[None, Literal["infer"], Mapping[str, Literal["space", "time", "channel"]]] = None,
+        axis_types: Union[None, Literal["infer"], Mapping[AxisKey, Literal["space", "time", "channel"]]] = None,
     ) -> Dict[str, Any]:
         if version not in ome_zarr.SUPPORTED_OME_ZARR_VERSIONS_WRITE:
             raise ValueError("Cannot write OME-Zarr versions other than 0.4, 0.5 and 0.6.dev4.")
@@ -835,6 +823,7 @@ class Multiscale(_ScaleMapping[str, Scale], TransformGraphNode):
                 result["datasets"].append(dataset)
             return result
 
+        assert self._intrinsic_ref.owner, "dev error: must always have intrinsic"
         intrinsic_system_dict = self._intrinsic_ref.owner.to_ome_zarr(
             name="", version=version, axis_types=axis_types, unit=self.first_value().unit
         )
@@ -861,7 +850,7 @@ class Multiscale(_ScaleMapping[str, Scale], TransformGraphNode):
         assert (
             len(legacy_tfs) <= 1
         ), f"Dev error: More than one multiscale-level transform in {self._transform_graph.transforms}"
-        result["coordinateTransformations"] = legacy_tfs[0].to_ome_zarr(version)
+        result["coordinateTransformations"] = [t.to_ome_zarr(version) for t in legacy_tfs[0].transforms]
         axes = list(self.axes())
         global_scale = ome_zarr.scale_to_pixel_size_with_normalized_zeros(legacy_tfs[0].scale_transform, axes)
         global_translation = Translation.identity(axes)

@@ -4,7 +4,7 @@ import re
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Union, Literal, Dict, List, Any, Optional, Tuple, Protocol, Iterable
+from typing import Union, Dict, List, Any, Optional, Tuple, Protocol, Iterable, TYPE_CHECKING
 
 from clearscale._axis_values import ShapeLike, Translation, PixelSize, AxisKey
 from clearscale._transforms import (
@@ -19,6 +19,9 @@ from clearscale._transforms import (
     Transform,
 )
 
+if TYPE_CHECKING:
+    from clearscale._multiscale import Multiscale
+
 SUPPORTED_OME_ZARR_VERSIONS_READ = ("0.1", "0.2", "0.3", "0.4", "0.5", "0.6.dev4")
 SUPPORTED_OME_ZARR_VERSIONS_WRITE = ("0.4", "0.5", "0.6.dev4")
 
@@ -27,14 +30,30 @@ SUPPORTED_OME_ZARR_VERSIONS_WRITE = ("0.4", "0.5", "0.6.dev4")
 ####
 
 
-OME_ZARR_TRANSFORM = Dict[str, Any]
+OME_ZARR_TRANSFORM = Mapping[str, Any]
+"""
+Single transform.
+"type": str (Possible values vary by version. Inside OME_ZARR_DATASET only "scale" and "translation")
+"scale": List[float] (if type=="scale")
+"translation": List[float] (if type=="translation")
+"input": 0.6+ only, inside OME_ZARR_DATASET, dict with key "path" (str)
+"output": 0.6+ only, inside OME_ZARR_DATASET, dict with key "name" (str)
+"""
 OME_ZARR_TRANSFORMS = Union[OME_ZARR_TRANSFORM, List[OME_ZARR_TRANSFORM]]
-OME_ZARR_DATASET = Dict[Literal["path", "coordinateTransformations"], Any]  # single dataset (= scale)
-OME_ZARR_MULTISCALE = Dict[  # single multiscales entry of a json-validated OME-Zarr zattrs (any version)
-    # The spec allows for multiple multiscales, but in practice we only ever see one.
-    Literal["axes", "datasets", "version", "coordinateTransformations", "name", "coordinateSystems"],
-    Union[List[Dict], List[OME_ZARR_DATASET], str],
-]
+OME_ZARR_DATASET = Mapping[str, Any]
+"""
+Single dataset (scale-level).
+"path": str
+"coordinateTransformations": List[OME_ZARR_TRANSFORM]
+"""
+OME_ZARR_MULTISCALE = Mapping[str, Any]
+"""
+Single entry of ["multiscales"] list.
+"datasets": List[OME_ZARR_DATASET]
+"axes": 0.3: List[str] (axis key strings), 0.4 and 0.5: List[Dict] (axis key under "name")
+"coordinateSystems": 0.6+ only, List[Dict] (containing "axes" List[Dict] with "name" keys)
+"coordinateTransformations": List[OME_ZARR_TRANSFORM]; 0.4 and 0.5: as inside "datasets"; 0.6: like in Scene
+"""
 GetShapeFunction = Callable[[str], Tuple[int, ...]]
 """
 path: Relative path to a zarr array.
@@ -51,7 +70,7 @@ ShapeValue = Union[Sequence[int], ShapeLike, HasShape]
 
 
 class ShapeSourceMap(Protocol):
-    def __getitem__(self, path: str) -> ShapeValue: ...
+    def __getitem__(self, path: str, /) -> ShapeValue: ...
 
 
 ShapeSource = Union[Callable[[str], ShapeValue], ShapeSourceMap]
@@ -74,7 +93,7 @@ def normalize_shape_source_to_callable(shape_source: ShapeSource) -> GetShapeFun
 
 
 def _normalize_shape_value_to_tuple(value: ShapeValue) -> Tuple[int, ...]:
-    raw_shape = getattr(value, "shape", value)
+    raw_shape: Any = getattr(value, "shape", value)
     if isinstance(raw_shape, Mapping):
         raw_shape = raw_shape.values()
     try:
@@ -107,11 +126,17 @@ class MultiscaleTransforms(TransformSequence):
 
     @property
     def scale_transform(self) -> ScaleTransform:
-        return self.transforms[0]  # noqa
+        scale = self.transforms[0]
+        assert isinstance(scale, ScaleTransform), f"Dev error: Expected scale, got {scale!r}"
+        return scale
 
     @property
     def translation_transform(self) -> Optional[TranslationTransform]:
-        return self.transforms[1] if len(self.transforms) == 2 else None
+        if len(self.transforms) != 2:
+            return None
+        translation = self.transforms[1]
+        assert isinstance(translation, TranslationTransform), f"Dev error: Expected translation, got {translation!r}"
+        return translation
 
     @classmethod
     def from_list(cls, ome_transformations: Optional[OME_ZARR_TRANSFORMS]) -> Optional["MultiscaleTransforms"]:
@@ -143,9 +168,10 @@ class MultiscaleTransforms(TransformSequence):
             except ValueError:
                 continue
             if isinstance(t, TransformSequence):
-                if (len(t) == 1 and isinstance(t[0], ScaleTransform)) or (
-                    len(t) == 2 and isinstance(t[0], ScaleTransform) and isinstance(t[1], TranslationTransform)
-                ):
+                if len(t) == 1 and isinstance(t[0], ScaleTransform):
+                    scale = t[0]
+                    continue
+                if len(t) == 2 and isinstance(t[0], ScaleTransform) and isinstance(t[1], TranslationTransform):
                     scale, translation = t.transforms
                     break
             if isinstance(t, ScaleTransform) and scale is None:
@@ -159,6 +185,7 @@ class MultiscaleTransforms(TransformSequence):
         if scale is None and translation is None:
             return None
         elif scale is None:
+            assert isinstance(translation, TranslationTransform), "should've made sure by now"
             scale = ScaleTransform(scale=tuple(1.0 for _ in range(translation._source_ndim_by_payload())))
         return cls(transforms=(scale,) if translation is None else (scale, translation))
 
@@ -168,8 +195,10 @@ class MultiscaleTransforms(TransformSequence):
         if not self._endpoints_can_chain_after(earlier):
             return None
         scale_product = self.scale_transform.composed_with(earlier.scale_transform)
+        assert isinstance(scale_product, ScaleTransform), "scales can always compose"
         if earlier.translation_transform is not None and self.translation_transform is not None:
             translation_sum = self.translation_transform.composed_with(earlier.translation_transform)
+            assert isinstance(translation_sum, TranslationTransform), "translations can always compose"
             transforms = (scale_product, translation_sum)
         elif earlier.translation_transform is not None:
             transforms = (scale_product, earlier.translation_transform)
@@ -185,7 +214,7 @@ class MultiscaleTransforms(TransformSequence):
         )
 
 
-def require_dataset_paths(raw: Dict):
+def require_dataset_paths(raw: Mapping[str, Any]):
     """Light top-level checks. coordinateTransformations are validated later."""
     version = raw.get("version")
     if version and version not in SUPPORTED_OME_ZARR_VERSIONS_READ:
@@ -232,6 +261,7 @@ def _output_system_name_from_datasets(multiscale: OME_ZARR_MULTISCALE) -> Option
 def extract_multiscale_graph(
     multiscale: OME_ZARR_MULTISCALE,
 ) -> Tuple[TransformGraph, CoordinateSystemRef[CoordinateSystem]]:
+    intrinsic_system_name: Optional[str] = None
     try:
         intrinsic_system_name = _output_system_name_from_datasets(multiscale)
         if not intrinsic_system_name:
@@ -268,6 +298,8 @@ def extract_multiscale_graph(
             f"Error: {str(e)}"
             f"Received: {multiscale}"
         )
+        if not intrinsic_system_name:
+            raise e
         intrinsic_system_ref = intrinsic_sys.as_ref(intrinsic_system_name)
         graph = TransformGraph.single_isolated_system(intrinsic_system_ref)
         return graph, intrinsic_system_ref
@@ -294,7 +326,9 @@ def multiscale_graph_from_legacy(
         # for perfect metadata round-trip.
         mock_ref = _UnresolvedRef(name=f"{name}-intermediate")
         try:
-            bound_transform = global_transforms.bound(source=intrinsic_system_ref, target=mock_ref)
+            bound_sequence = global_transforms.bound(source=intrinsic_system_ref, target=mock_ref)
+            assert isinstance(bound_sequence, MultiscaleTransforms), "should not change type"
+            bound_transform = bound_sequence
             graph = TransformGraph([bound_transform])
         except ValueError:
             # E.g. mismatching number of axes between transforms and coordinate system
@@ -304,7 +338,7 @@ def multiscale_graph_from_legacy(
 
 def scale_meta_from_dataset_transforms(
     axis_keys: Sequence[AxisKey],
-    global_transforms: "MultiscaleTransforms",
+    global_transforms: Optional["MultiscaleTransforms"],
     relative_scale_pixel_size: PixelSize,
     transformations: Optional[OME_ZARR_TRANSFORMS],
 ) -> Tuple[PixelSize, Optional[Translation], Optional[Tuple[AxisKey, ...]]]:
@@ -347,13 +381,13 @@ def scale_meta_from_dataset_transforms(
         )
         return relative_scale_pixel_size, None, None
 
-    composed_transforms = dataset_transforms
+    composed_transforms: MultiscaleTransforms = dataset_transforms
 
     if global_transforms is not None:
         try:
-            composed_transforms = TransformSequence((dataset_transforms, global_transforms)).collapsed(
-                raise_uncollapsed=True
-            )
+            collapsed = TransformSequence((dataset_transforms, global_transforms)).collapsed(raise_uncollapsed=True)
+            if isinstance(collapsed, MultiscaleTransforms):
+                composed_transforms = collapsed
         except ValueError:
             pass
 
@@ -376,7 +410,7 @@ def scale_meta_from_dataset_transforms(
 
 
 def scale_to_pixel_size_with_normalized_zeros(scale_transform: ScaleTransform, axes: Sequence[AxisKey]) -> PixelSize:
-    normalized_scale = (PixelSize._default if value == 0 else value for value in scale_transform.scale)
+    normalized_scale = (PixelSize._default() if value == 0 else value for value in scale_transform.scale)
     return PixelSize(zip(axes, normalized_scale))
 
 
@@ -445,7 +479,7 @@ def build_dataset_dict(
         translation = TranslationTransform.from_translation(dataset_translation)
         components = (scale, translation)
     if version in PRE_TRANSFORMS_VERSIONS:
-        dataset_transforms = TransformSequence(components).to_ome_zarr(version)
+        dataset_transforms = [t.to_ome_zarr(version) for t in components]
     else:
         dataset_path = _UnresolvedRef(name=None, path=str(key))
         # The "single transform inside a list" requirement of 0.6 actually makes this more awkward

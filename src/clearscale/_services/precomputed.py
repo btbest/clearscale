@@ -1,23 +1,25 @@
-from typing import Dict, List, Literal, Sequence, Tuple, Union
+from typing import Any, Mapping, Sequence, Tuple
 
 from clearscale._axis_values import AxisKey, PixelSize
 
-SCALES_DICT = Dict[
-    Literal["key", "size", "resolution", "voxel_offset"],
-    Union[str, List[int], List[float]],
-]
-INFO_DICT = Dict[
-    Literal["scales", "num_channels"],
-    Union[List[SCALES_DICT], int],
-]
+SCALES_DICT = Mapping[str, Any]
+"""
+Expected:
+"key" (str), "size" (List[int]), "resolution" (List[float]), "voxel_offset" (List[int])
+"""
+INFO_DICT = Mapping[str, Any]
+"""
+Expected:
+"scales" (List[SCALES_DICT]), "num_channels" (int)
+"""
 
 
-def zero_resolution_axes(resolution: List[float], axes: Sequence[AxisKey]) -> Tuple[AxisKey, ...]:
+def zero_resolution_axes(resolution: Sequence[float], axes: Sequence[AxisKey]) -> Tuple[AxisKey, ...]:
     return tuple(axis for axis, value in zip(axes, resolution) if value == 0)
 
 
-def pixel_size_from_resolution(resolution: List[float], axes: Sequence[AxisKey]) -> PixelSize:
-    normalized_resolution = [PixelSize._default if value == 0 else value for value in resolution]
+def pixel_size_from_resolution(resolution: Sequence[float], axes: Sequence[AxisKey]) -> PixelSize:
+    normalized_resolution = [PixelSize._default() if value == 0 else value for value in resolution]
     return PixelSize(zip(axes, [1.0] + list(reversed(normalized_resolution))))
 
 

@@ -434,4 +434,4 @@ def test_from_ome_zarr_rejects_plain_string_shape_source():
     }
 
     with pytest.raises(TypeError, match="Cannot obtain array shape from plain path"):
-        Multiscale.from_ome_zarr(metadata, shape_source="image.ome.zarr")
+        Multiscale.from_ome_zarr(metadata, shape_source="image.ome.zarr")  # type: ignore

@@ -22,7 +22,6 @@ __all__ = [
     "BlueprintShapes",
     "DuplicatePolicy",
     "Factor",
-    "IdentityTransform",
     "Multiscale",
     "PixelOffset",
     "PixelSize",
