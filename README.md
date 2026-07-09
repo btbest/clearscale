@@ -4,17 +4,19 @@
 
 Fits in any Python environment. Works with existing code. Handles all OME-Zarr versions.
 
-With `clearscale`, metadata runs alongside data processing, and can provide the required parameters:
+With `clearscale`, metadata runs alongside data processing.
+
+Ideally, to ensure data and metadata are in sync, the pipeline first specifies the operation plan as metadata, and then uses the metadata itself as parameters:
 
 ```python
-from clearscale import Shape, PixelSize, Unit, Scale, BlueprintShapes, Multiscale
+from clearscale import Shape, PixelSize, Unit, BlueprintShapes, Scale, Multiscale
 
 # 1. Annotate
 shape      = Shape(zip("tzyx", my_data.shape))
 pixel_size = PixelSize(t=5.0, z=260.0, y=0.53, x=0.53)
 unit       = Unit(t="s", z="micrometer", y="micrometer", x="micrometer")
 
-# 2. Define scaling paradigm
+# 2. Define operation plan
 scaling_blueprint = BlueprintShapes.downscale_powers_of_2_xyz(
     base_shape=shape,
     rounding="ceil",
@@ -35,8 +37,11 @@ zarr_group.attrs["ome"] = {
 }
 ```
 
+It may sometimes be simpler to instead describe the data processing post-hoc, and derive matching metadata (as in the numpy example further down).
+Proceed whichever way best fits your project.
+
 `clearscale` is independent of the actual data-handling packages in your environment.
-For example, if you use `numpy`, `scikit-image` and `zarr`, the placeholders above could look like:
+For example, if you use `numpy`, `scikit-image` and `zarr-python`, the placeholders above could look like:
 
 ```
 import os, numpy, skimage, zarr
@@ -56,11 +61,17 @@ zarr_group = zarr.open_group(os.path.expanduser("~/cltest.ome.zarr"), mode="w")
 * Saves you learning about the metadata format(s)
 * Helps you write expressive code
 * Metadata manipulation lives alongside data manipulation
-* Blueprints are as flexible as your image processing needs
 
 ## Install
 
-Until the first package release:
+`clearscale` is still being actively developed.
+We would love to hear your feedback if you try it out!
+
+This also means the API is subject to change, particularly regarding names of classes, methods, etc., and regarding required parameters.
+We want the 1.0 API to be as intuitive as possible.
+If you encounter anything unclear, please feel free to suggest alternatives.
+
+Until the first package release you can install directly from GitHub:
 
 ```bash
 pip install git+https://github.com/ilastik/clearscale.git
@@ -75,7 +86,7 @@ dependencies:
       - git+https://github.com/ilastik/clearscale.git
 ```
 
-## Examples
+## End-to-end examples
 
 ### Downsample a numpy array and save it as OME-Zarr
 
@@ -161,7 +172,9 @@ local_group.attrs["multiscales"] = [target_multiscale.to_ome_zarr(version="0.4")
 
 ## Documentation
 
-See `docs/basics.md`.
+Basic docs are at [`docs/index.md`](docs/index.md).
+
+Generally though, we hope the API is sufficiently self-documenting and discoverable through tab-completion and type annotations ;)
 
 ## Why clearscale?
 
@@ -201,25 +214,31 @@ clearscale is tiny, dependency-free, permissively licensed, and works around you
 
 ### Zarr is complex enough
 
-There are
-[multiple](https://github.com/zarr-developers/zarr-python)
+There
+[are](https://github.com/zarr-developers/zarr-python)
+[several](https://github.com/canpute/simplezarr)
 [backend](https://github.com/google/tensorstore)
 [packages](https://github.com/constantinpape/z5)
 your application or script might use for reading and writing zarr data.
-Implementing efficient, chunk-wise (shard-wise) data handling is complex on its own.
-You shouldn't need to learn the OME metadata specification on top to make your datasets
-* accessible to others
-* interoperable with other tools.
+Implementing data processing in an efficient, chunk-wise (shard-wise) manner is complex on its own.
+You shouldn't need to learn the OME metadata specification on top to make your datasets accessible to others, or interoperable with other tools.
 
 With clearscale, no matter how you handle zarr *data*, handling multiscale *metadata* like OME-Zarr looks the same.
 
 ### Custom applications
 
 There are thousands of ways to scale or otherwise transform an image.
-Maybe none of the existing libraries that can write OME-Zarr supports quite what you need.
+Maybe none of the existing libraries that can write OME-Zarr implements quite what you need, so you have to roll your own.
 
 clearscale isn't tied to data processing.
-Whatever you're doing, clearscale can simplify metadata manipulation (and maybe even help catch bugs earlier).
+Whatever you're doing, clearscale can simplify metadata manipulation.
+
+### Should I use `clearscale` in my project right now?
+
+If you're willing to adapt to future changes in the API: Yes, please do try it!
+
+If you are looking for a stable API, please wait until the first formal release to PyPI.
+After that point, API changes will follow semver and deprecations will be avoided or give appropriate notice through DeprecationWarnings.
 
 ## License
 

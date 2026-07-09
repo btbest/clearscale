@@ -27,9 +27,11 @@ Lower-level modules must not import higher-level modules.
 
 ## Public APIs
 
+clearscale aims to provide a hyper-intuitive API with optimal IDE support like tab-completion and greppability.
+
 - Optimise public APIs for ergonomics, discoverability, and easy adoption in existing code bases. "Works with existing code."
 - Internal implementation complexity is acceptable when it significantly simplifies the public API.
-- If possible, public methods should accept both clearscale types and equivalent native Python types (e.g. `Union[Shape, Mapping[ScaleKey, int]]`) (but always return clearscale types).
+- If possible, public methods should accept both clearscale types and equivalent native Python types (e.g. `Union[Shape, Mapping[AxisKey, int]]`) (but always return clearscale types).
 
 ## Collection-like APIs
 

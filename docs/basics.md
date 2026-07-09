@@ -155,7 +155,7 @@ assert total_crop == Translation(c=0.0, y=12.0, x=12.0)
 `with_axes` is available on all "axis values". This
 * reorders existing values to the specified order,
 * removes axes not present in the target set,
-* inserts the type's default value for new axes (Shape: `1`, PixelOffset: `0`, PixelSize and Factor: `1.0`, Translation: `1.0`)
+* inserts the type's default value for new axes (Shape: `1`, PixelOffset: `0`, PixelSize and Factor: `1.0`, Translation: `0.0`)
 
 Except of course, these are all immutable objects. The original object is not modified; a new object is returned:
 
