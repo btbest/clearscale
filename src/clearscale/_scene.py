@@ -8,8 +8,9 @@ from clearscale._multiscale import Multiscale
 from clearscale._transforms import (
     RelativePath,
     CoordinateSystemName,
-    CoordinateSystemRef,
+    NodeRef,
     _UnresolvedRef,
+    AnyRef,
     Transform,
     TransformGraph,
 )
@@ -129,9 +130,7 @@ class Scene:
             return self._full_graph.path_between(source_ref, target_ref)
         return self._internal_graph.path_between(source_ref, target_ref)
 
-    def _get_ref_for_key(
-        self, key: UserFacingCoordinateSystemKey, include_children: bool
-    ) -> Optional[CoordinateSystemRef]:
+    def _get_ref_for_key(self, key: UserFacingCoordinateSystemKey, include_children: bool) -> Optional[AnyRef]:
         if isinstance(key, dict):  # Dict[Literal["path", "name"], Union[RelativePath, CoordinateSystemName]]
             if key["path"] in self._multiscale_paths:
                 return self._multiscale_paths[key["path"]].as_ref(key["name"])
@@ -148,7 +147,7 @@ class Scene:
 
         if isinstance(key, CoordinateSystemName):
             # Purely matching by name could bring up refs to any TransformGraphNode
-            # (Multiscale, CoordinateSystem, or None in case of _UnresolvedRef)
+            # (Multiscale, CoordinateSystem, or placeholder _UnresolvedRef)
             own_systems = self._internal_graph.connected_system_refs
             for ref in own_systems:  # Expected: These CoordinateSystems can only be retrieved by name
                 if ref.name == key:
@@ -179,6 +178,6 @@ class Scene:
             if multiscale is None:
                 continue
             assert new_ref is not None, f"Dev error: previously not-None {old_ref!r} became None {new_ref!r}"
-            if isinstance(new_ref.owner, Multiscale) and new_ref.owner is multiscale:
+            if isinstance(new_ref, NodeRef) and isinstance(new_ref.owner, Multiscale) and new_ref.owner is multiscale:
                 resolved_paths[old_ref.path] = multiscale
         return resolved_paths

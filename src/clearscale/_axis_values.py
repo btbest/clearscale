@@ -26,7 +26,8 @@ AxisMappedPrimitive = TypeVar("AxisMappedPrimitive", int, float, str)
 Axes = Union[Collection[AxisKey], str]
 Scalar = Union[int, float, numbers.Real]
 ShapeLike = Union["Shape", Mapping[AxisKeyT, int]]
-RoundingMethod = Union[Literal["ceil"], Literal["floor"], Literal["round"], Callable[[float], int]]
+RoundingFunction = Callable[[float], int]
+RoundingMethod = Union[Literal["ceil"], Literal["floor"], Literal["round"], RoundingFunction]
 _AxisMappingSelf = TypeVar("_AxisMappingSelf", bound="_AxisMapping[Any, Any]")
 _AxisValuesSelf = TypeVar("_AxisValuesSelf", bound="_AxisValues[Any, Any]")
 
@@ -197,7 +198,7 @@ class _AxisValues(ABC, _AxisMapping[AxisKeyT, AxisMappedPrimitive], Generic[Axis
             return self.__class__(self)
         replaced_items = []
         for a in self:
-            new_value = self[a]
+            new_value: Union[Scalar, str] = self[a]
             if _axis_in(a, axes) and a in other and other[a] is not None:
                 new_value = other[a]
             if type(self[a]) != type(new_value):
@@ -235,7 +236,7 @@ def _require_axes_present(
         )
 
 
-def _normalize_rounding(rounding: RoundingMethod):
+def _normalize_rounding(rounding: RoundingMethod) -> RoundingFunction:
     if rounding == "ceil":
         return math.ceil
     if rounding == "floor":
@@ -408,7 +409,7 @@ class PixelSize(_AxisFloats):
         :return: Returns the newly created or the modified AxisTags.
         """
         try:
-            import vigra  # pyright: ignore
+            import vigra  # type: ignore[import-not-found]
         except ImportError as e:
             raise ImportError(
                 'This function requires the package "vigra". '

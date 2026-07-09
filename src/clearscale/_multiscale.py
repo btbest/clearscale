@@ -12,6 +12,7 @@ from typing import (
     Generic,
     Union,
     Sequence,
+    Set,
     Callable,
     Iterable,
     List,
@@ -39,7 +40,7 @@ from clearscale._transforms import (
     CoordinateSystemName,
     CoordinateSystem,
     TransformGraph,
-    CoordinateSystemRef,
+    NodeRef,
     IdentityTransform,
     TransformGraphNode,
     PRE_TRANSFORMS_VERSIONS,
@@ -315,7 +316,7 @@ class _ScaledAxisValues(_ScaleMapping[AxisValuesType], Generic[AxisValuesType]):
         if duplicates and on_duplicate == DuplicatePolicy.ERROR:
             raise ValueError(f"Duplicate values not allowed. Collisions: {duplicates}")
 
-        pop_keys = []
+        pop_keys: List[ScaleKey] = []
         for dup_keys in duplicates:
             if on_duplicate_prefer is not None and on_duplicate_prefer in dup_keys:
                 keep = on_duplicate_prefer
@@ -572,7 +573,7 @@ class BlueprintFactors(_ScaledAxisValues[Factor]):
         if len(self) < 2:
             return ()
 
-        scaled = set()
+        scaled: Set[AxisKey] = set()
         for factor in self.values():
             scaled.update(axis for axis, value in factor.items() if value != 1.0)
 
@@ -610,7 +611,7 @@ def _random_multiscale_name(seed: int | str | None = None) -> str:
 class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
     _transform_graph: TransformGraph
     """Transform graph that by default consists only of one isolated node: _intrinsic_ref."""
-    _intrinsic_ref: CoordinateSystemRef[CoordinateSystem]
+    _intrinsic_ref: NodeRef[CoordinateSystem]
     """The system in which the Scales' shape, pixel size, translation etc. are correct."""
     _zero_scale_axes_by_key: Mapping[str, Tuple[AxisKey, ...]]
     """Dataset scale axes that were read as 0.0 from loaded meta; kept for as-read round-trip."""
@@ -619,7 +620,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         self,
         *args,
         _transform_graph: Optional[TransformGraph] = None,
-        _intrinsic_ref: Optional[CoordinateSystemRef[CoordinateSystem]] = None,
+        _intrinsic_ref: Optional[NodeRef[CoordinateSystem]] = None,
         _zero_scale_axes_by_key: Optional[Mapping[str, Tuple[AxisKey, ...]]] = None,
         **kwargs,
     ):
@@ -708,7 +709,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             if base_shape is None:
                 base_shape = scale_shape
             relative_scale_factor = base_shape.scaling_to(scale_shape)
-            relative_scale_pixel_size = PixelSize.identity(axis_keys) * relative_scale_factor
+            relative_scale_pixel_size = PixelSize.identity(axis_keys).scaled_by(relative_scale_factor)
             transformations = dataset.get("coordinateTransformations")
             scale_pixel_size, scale_translation, zero_scale_axes = ome_zarr.scale_meta_from_dataset_transforms(
                 axis_keys, global_transforms, relative_scale_pixel_size, transformations
@@ -804,7 +805,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         if version not in ome_zarr.SUPPORTED_OME_ZARR_VERSIONS_WRITE:
             raise ValueError("Cannot write OME-Zarr versions other than 0.4, 0.5 and 0.6.dev4.")
         ome_zarr.validate_multiscale(self)
-        result = {"version": version, "datasets": []}
+        result: Dict[str, Any] = {"version": version, "datasets": []}
 
         if name:
             result["name"] = name
@@ -872,17 +873,15 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             result["datasets"].append(dataset)
         return result
 
-    def _make_single_system_graph(
-        self, sys_ref: Optional[CoordinateSystemRef[CoordinateSystem]] = None
-    ) -> TransformGraph:
+    def _make_single_system_graph(self, sys_ref: Optional[NodeRef[CoordinateSystem]] = None) -> TransformGraph:
         if sys_ref is None:
             intrinsic_sys = CoordinateSystem.without_semantics(list(self.axes()))
             intrinsic_name = _random_multiscale_name()
             sys_ref = intrinsic_sys.as_ref(intrinsic_name)
         return TransformGraph.single_isolated_system(sys_ref)
 
-    def as_ref(self, name: CoordinateSystemName) -> CoordinateSystemRef["Multiscale"]:
-        return CoordinateSystemRef(name=str(name), owner=self)
+    def as_ref(self, name: CoordinateSystemName) -> NodeRef["Multiscale"]:
+        return NodeRef(name=str(name), owner=self)
 
     def _get_interface_transform(self):
         """Allows a scene to traverse into this subgraph"""

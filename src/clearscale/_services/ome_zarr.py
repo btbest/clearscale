@@ -12,7 +12,7 @@ from clearscale._transforms import (
     ScaleTransform,
     TranslationTransform,
     TransformGraph,
-    CoordinateSystemRef,
+    NodeRef,
     CoordinateSystem,
     _UnresolvedRef,
     PRE_TRANSFORMS_VERSIONS,
@@ -158,8 +158,8 @@ class MultiscaleTransforms(TransformSequence):
         ome_transformations = _as_transform_list(ome_transformations)
         if not ome_transformations:
             return None
-        scale = None
-        translation = None
+        scale: Optional[ScaleTransform] = None
+        translation: Optional[TranslationTransform] = None
         for t_dict in ome_transformations:
             # Best effort: Find first valid combination,
             # and accept even a valid translation without valid scale
@@ -172,7 +172,8 @@ class MultiscaleTransforms(TransformSequence):
                     scale = t[0]
                     continue
                 if len(t) == 2 and isinstance(t[0], ScaleTransform) and isinstance(t[1], TranslationTransform):
-                    scale, translation = t.transforms
+                    scale = t[0]
+                    translation = t[1]
                     break
             if isinstance(t, ScaleTransform) and scale is None:
                 scale = t
@@ -199,7 +200,7 @@ class MultiscaleTransforms(TransformSequence):
         if earlier.translation_transform is not None and self.translation_transform is not None:
             translation_sum = self.translation_transform.composed_with(earlier.translation_transform)
             assert isinstance(translation_sum, TranslationTransform), "translations can always compose"
-            transforms = (scale_product, translation_sum)
+            transforms: Tuple[Transform, ...] = (scale_product, translation_sum)
         elif earlier.translation_transform is not None:
             transforms = (scale_product, earlier.translation_transform)
         elif self.translation_transform is not None:
@@ -260,7 +261,7 @@ def _output_system_name_from_datasets(multiscale: OME_ZARR_MULTISCALE) -> Option
 
 def extract_multiscale_graph(
     multiscale: OME_ZARR_MULTISCALE,
-) -> Tuple[TransformGraph, CoordinateSystemRef[CoordinateSystem]]:
+) -> Tuple[TransformGraph, NodeRef[CoordinateSystem]]:
     intrinsic_system_name: Optional[str] = None
     try:
         intrinsic_system_name = _output_system_name_from_datasets(multiscale)
@@ -307,7 +308,7 @@ def extract_multiscale_graph(
 
 def multiscale_graph_from_legacy(
     multiscale: OME_ZARR_MULTISCALE, *, name: str
-) -> Tuple[TransformGraph, CoordinateSystemRef[CoordinateSystem], Optional[MultiscaleTransforms]]:
+) -> Tuple[TransformGraph, NodeRef[CoordinateSystem], Optional[MultiscaleTransforms]]:
     multiscale_tf_list = multiscale.get("coordinateTransformations")
     try:
         global_transforms = MultiscaleTransforms.from_list(multiscale_tf_list)
@@ -470,11 +471,11 @@ def build_dataset_dict(
     key,
     dataset_scale: PixelSize,
     dataset_translation: Translation,
-    intrinsic_ref: Optional[CoordinateSystemRef[CoordinateSystem]] = None,
+    intrinsic_ref: Optional[NodeRef[CoordinateSystem]] = None,
     serialized_zero_scale_axes: Iterable[AxisKey] = (),
 ) -> Dict[str, Any]:
     scale = pixel_size_to_scale_with_reintroduced_zeros(dataset_scale, serialized_zero_scale_axes)
-    components = (scale,)
+    components: Tuple[Transform, ...] = (scale,)
     if not dataset_translation.is_identity():
         translation = TranslationTransform.from_translation(dataset_translation)
         components = (scale, translation)
