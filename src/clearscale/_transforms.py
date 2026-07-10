@@ -761,14 +761,25 @@ class TransformSequence(Transform):
         return replace(self, transforms=tuple(result))
 
     def _validate_child_ndim_chain(self) -> None:
-        for i, (earlier, later) in enumerate(zip(self.transforms, self.transforms[1:])):
-            earlier_ndim = earlier._ndim_by_payload()
-            later_ndim = later._ndim_by_payload()
-            if earlier_ndim is not None and later_ndim is not None and earlier_ndim[1] != later_ndim[0]:
+        earlier_target_ndim: Optional[int] = None
+        earlier: Optional[Transform] = None
+
+        for transform in self.transforms:
+            ndim = transform._ndim_by_payload()
+            if ndim is None:
+                continue
+
+            source_ndim, target_ndim = ndim
+            if earlier_target_ndim is not None and source_ndim != earlier_target_ndim:
+                assert earlier is not None
                 raise ValueError(
-                    f"Transform chain dimensionality mismatches at {i}->{i+1}: "
-                    f"{earlier_ndim[1]!r} != {later_ndim[0]!r}"
+                    "Transform chain dimensionality mismatches: "
+                    f"{type(earlier).__name__}(target_ndim={earlier_target_ndim!r}) != "
+                    f"{type(transform).__name__}(source_ndim={source_ndim!r})"
                 )
+
+            earlier_target_ndim = target_ndim
+            earlier = transform
 
 
 def _ordered_unique_refs(refs: Iterable[_RefT]) -> Tuple[_RefT, ...]:
