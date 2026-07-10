@@ -267,7 +267,17 @@ class Transform(ABC):
     `source_coords x t = target_coords`
     This convention prioritises *technical simplicity*, not mathematical theory.
     Transforming array indices or slicings to meaningful physical coordinates is simple:
-    `[0, 124, 124] x Scale(1, 0.2, 0.2) = [0, 24.8, 24.8]`
+    `[0, 124, 124] x Scale(1, 0.2, 0.2) = [0, 24.8, 24.8]`.
+
+    The responsibility split is: AxisValues handle all semantic operations and arithmetic related
+    to the values and concepts they represent.
+    Transforms should only be concerned with managing endpoints (source, target).
+    They should ideally remain an implementation detail for serializing image processing concepts like
+    Multiscale and Scene (spatial relationships between Multiscales) to OME-Zarr; not part of the package API.
+
+    Example: PixelSize has to/from vigra converters and arithmetic interactions with e.g. Factor.
+    ScaleTransform conceptually corresponds to pixel size, but knows nothing about axes and does not do arithmetic
+    outside of e.g. dimensionality-validating its endpoints and composing inside a TransformSequence.
     """
 
     source: Optional[AnyRef] = field(default=None, kw_only=True)
@@ -482,17 +492,6 @@ class Transform(ABC):
 
     def _composed_target(self, earlier: "Transform") -> Optional[AnyRef]:
         return self.target if self.target is not None else earlier.target
-
-    # Import methods: These handle normalizing common image processing packages' conventions for
-    # computing/providing transforms to OME-Zarr's convention.
-    # They're only applicable for certain subclasses, so should go there
-    # def from_skimage(self):
-    #     # Method must know how skimage stores transforms and determine which
-    #     # coordinate system is the .input and which the .output when the user passes an skimage transform object
-    #     ...
-    # def from_itk(self):
-    #     # E.g. probably need to do A_omezarr = np.linalg.inv(A_ITK_homogeneous) for ITK affines
-    #     ... # from_simpleitk, from_scipy, from_antspy...
 
 
 @dataclass(frozen=True, slots=True)
