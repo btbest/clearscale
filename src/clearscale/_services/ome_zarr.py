@@ -187,7 +187,7 @@ class MultiscaleTransforms(TransformSequence):
             return None
         elif scale is None:
             assert isinstance(translation, TranslationTransform), "should've made sure by now"
-            scale = ScaleTransform(scale=tuple(1.0 for _ in range(translation._source_ndim_by_payload())))
+            scale = ScaleTransform(scale=tuple(1.0 for _ in range(translation._ndim_by_payload()[0])))
         return cls(transforms=(scale,) if translation is None else (scale, translation))
 
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:

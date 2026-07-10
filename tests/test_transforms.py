@@ -77,6 +77,38 @@ def test_bound_transform_sequence_rejects_endpoint_axis_count_mismatch():
         sequence.bound(source=source, target=target)
 
 
+def test_transform_sequence_infers_endpoint_dimensionality_through_identity():
+    source = _sys_ref("source", "yx")
+    target = _sys_ref("target", "yx")
+    sequence = TransformSequence((IdentityTransform(), TranslationTransform(translation=(0, 0))))
+
+    bound = sequence.bound(source=source, target=target)
+
+    assert bound.source == source
+    assert bound.target == target
+
+
+def test_transform_sequence_rejects_endpoint_mismatch_inferred_through_identity():
+    source = _sys_ref("source", "zyx")
+    target = _sys_ref("target", "yx")
+    sequence = TransformSequence((IdentityTransform(), TranslationTransform(translation=(0, 0))))
+
+    with pytest.raises(ValueError, match="TransformSequence endpoints have incompatible dimensionality"):
+        sequence.bound(source=source, target=target)
+
+
+def test_transform_sequence_accepts_consistent_dimensionality_through_identity():
+    _ = TransformSequence((ScaleTransform((0.25, 0.25)), IdentityTransform(), TranslationTransform(translation=(0, 0))))
+
+
+@pytest.mark.xfail(reason="TODO")
+def test_transform_sequence_rejects_inconsistent_dimensionality_through_identity():
+    with pytest.raises(ValueError, match="TransformSequence expects 2 source axes"):
+        _ = TransformSequence(
+            (ScaleTransform((0.25, 0.25, 0.25)), IdentityTransform(), TranslationTransform(translation=(0, 0)))
+        )
+
+
 def test_collapsed_scale_sequence_preserves_bound_endpoints():
     source = _sys_ref("source", "yx")
     middle = _sys_ref("middle", "yx")

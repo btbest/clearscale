@@ -283,6 +283,15 @@ class Transform(ABC):
     @abstractmethod
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]: ...
     @abstractmethod
+    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+        """Source and target dimensionality implied by this transform's payload.
+        Return (source_ndim, target_ndim) if dimensionality can be inferred from payload.
+        If this is not possible (e.g. identity: no payload, return None),
+        convention is to assume source dimensionality == target dimensionality.
+        """
+        ...
+
+    @abstractmethod
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         """Must return the OME-Zarr object properties that are specific to the respective Transform type.
         At a minimum, this includes {'type': '<ome-zarr type name>'}.
@@ -431,39 +440,25 @@ class Transform(ABC):
         target = endpoints["output"]
         return source, target
 
-    def _source_ndim_by_payload(self) -> Optional[int]:
-        """Source dimensionality implied by this transform's payload value (not the bound source).
-        None means any dimensionality works."""
-        return None
-
-    def _target_ndim_by_payload(self) -> Optional[int]:
-        """See _source_ndim_by_payload, but for self.target.
-        Only differs from source_ndim if the transform drops/adds axes."""
-        return None
-
     def _validate_bound_axes(self) -> None:
         source_axes = tuple(self.source.owner.axes()) if isinstance(self.source, NodeRef) else None
         target_axes = tuple(self.target.owner.axes()) if isinstance(self.target, NodeRef) else None
 
-        source_ndim = self._source_ndim_by_payload()
-        if source_ndim is not None and source_axes is not None and len(source_axes) != source_ndim:
-            raise ValueError(
-                f"{self.__class__.__name__} expects {source_ndim} source axes, but its source "
-                f"coordinate system has {len(source_axes)}: {list(source_axes)}"
-            )
-        target_ndim = self._target_ndim_by_payload()
-        if target_ndim is not None and target_axes is not None and len(target_axes) != target_ndim:
-            raise ValueError(
-                f"{self.__class__.__name__} expects {target_ndim} target axes, but its target "
-                f"coordinate system has {len(target_axes)}: {list(target_axes)}"
-            )
-        if (
-            source_ndim is None
-            and target_ndim is None
-            and source_axes is not None
-            and target_axes is not None
-            and len(source_axes) != len(target_axes)
-        ):
+        ndim = self._ndim_by_payload()
+        if ndim is not None:
+            source_ndim, target_ndim = ndim
+            if source_axes is not None and len(source_axes) != source_ndim:
+                raise ValueError(
+                    f"{self.__class__.__name__} expects {source_ndim} source axes, but its source "
+                    f"coordinate system has {len(source_axes)}: {list(source_axes)}"
+                )
+            if target_axes is not None and len(target_axes) != target_ndim:
+                raise ValueError(
+                    f"{self.__class__.__name__} expects {target_ndim} target axes, but its target "
+                    f"coordinate system has {len(target_axes)}: {list(target_axes)}"
+                )
+
+        if source_axes is not None and target_axes is not None and len(source_axes) != len(target_axes):
             # Payload gives no axis information -> source and target must be equal dimensionality.
             # Transform types that change axis number must provide explicit source/target_ndim.
             raise ValueError(
@@ -474,11 +469,13 @@ class Transform(ABC):
     def _endpoints_can_chain_after(self, earlier: "Transform") -> bool:
         if earlier.target is None or self.source is None or earlier.target == self.source:
             return True
-        self_ndim = self._source_ndim_by_payload()
-        earlier_ndim = earlier._target_ndim_by_payload()
-        if self_ndim is None or earlier_ndim is None or self_ndim == earlier_ndim:
+        self_ndim = self._ndim_by_payload()
+        earlier_ndim = earlier._ndim_by_payload()
+        if self_ndim is None or earlier_ndim is None:
             return True
-        return False
+        self_source_ndim = self_ndim[0]
+        earlier_target_ndim = earlier_ndim[1]
+        return self_source_ndim == earlier_target_ndim
 
     def _composed_source(self, earlier: "Transform") -> Optional[AnyRef]:
         return earlier.source if earlier.source is not None else self.source
@@ -511,6 +508,9 @@ class IdentityTransform(Transform):
         if not self._endpoints_can_chain_after(earlier):
             return None
         return replace(earlier, source=self._composed_source(earlier), target=self._composed_target(earlier))
+
+    def _ndim_by_payload(self) -> None:
+        return None
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         return {"type": "identity"}
@@ -548,11 +548,8 @@ class ScaleTransform(Transform):
         payload_dict = {"path": self.ome_zarr_path} if self.ome_zarr_path else {"scale": list(self.scale)}
         return {"type": "scale", **payload_dict}
 
-    def _source_ndim_by_payload(self) -> int:
-        return len(self.scale)
-
-    def _target_ndim_by_payload(self) -> int:
-        return len(self.scale)
+    def _ndim_by_payload(self) -> Tuple[int, int]:
+        return len(self.scale), len(self.scale)
 
     @classmethod
     def from_pixel_size(cls, pixel_size: PixelSize):
@@ -617,11 +614,8 @@ class TranslationTransform(Transform):
         payload_dict = {"path": self.ome_zarr_path} if self.ome_zarr_path else {"translation": list(self.translation)}
         return {"type": "translation", **payload_dict}
 
-    def _source_ndim_by_payload(self) -> int:
-        return len(self.translation)
-
-    def _target_ndim_by_payload(self) -> int:
-        return len(self.translation)
+    def _ndim_by_payload(self) -> Tuple[int, int]:
+        return len(self.translation), len(self.translation)
 
     @classmethod
     def from_translation(cls, translation: Translation):
@@ -713,11 +707,12 @@ class TransformSequence(Transform):
         self._validate_child_ndim_chain()
         Transform.__post_init__(self)
 
-    def _source_ndim_by_payload(self) -> Optional[int]:
-        return self.transforms[0]._source_ndim_by_payload()
-
-    def _target_ndim_by_payload(self) -> Optional[int]:
-        return self.transforms[-1]._target_ndim_by_payload()
+    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+        first_ndim = self.transforms[0]._ndim_by_payload()
+        last_ndim = self.transforms[-1]._ndim_by_payload()
+        if first_ndim is None or last_ndim is None:
+            return None
+        return first_ndim[0], last_ndim[1]
 
     def __hash__(self):
         return hash(self.transforms)
@@ -767,9 +762,12 @@ class TransformSequence(Transform):
 
     def _validate_child_ndim_chain(self) -> None:
         for i, (earlier, later) in enumerate(zip(self.transforms, self.transforms[1:])):
-            if earlier._target_ndim_by_payload() != later._source_ndim_by_payload():
+            earlier_ndim = earlier._ndim_by_payload()
+            later_ndim = later._ndim_by_payload()
+            if earlier_ndim is not None and later_ndim is not None and earlier_ndim[1] != later_ndim[0]:
                 raise ValueError(
-                    f"Transform chain dimensionality mismatches at {i}->{i+1}: {earlier._target_ndim_by_payload()!r} != {later._source_ndim_by_payload()!r}"
+                    f"Transform chain dimensionality mismatches at {i}->{i+1}: "
+                    f"{earlier_ndim[1]!r} != {later_ndim[0]!r}"
                 )
 
 
