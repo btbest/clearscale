@@ -14,6 +14,27 @@ from clearscale._transforms import (
 )
 
 
+def test_transform_name_round_trips():
+    transform = Transform.from_ome_zarr(
+        {
+            "type": "scale",
+            "name": "pixel-size",
+            "scale": [2.0],
+            "input": {"name": "source"},
+            "output": {"name": "target"},
+        }
+    )
+
+    assert transform._ome_zarr_name == "pixel-size"
+    assert transform.to_ome_zarr("0.6.dev4") == {
+        "type": "scale",
+        "scale": [2.0],
+        "name": "pixel-size",
+        "input": {"name": "source"},
+        "output": {"name": "target"},
+    }
+
+
 def _sys_ref(name, axes):
     return CoordinateSystem.without_semantics(axes).as_ref(name)
 

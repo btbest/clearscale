@@ -280,6 +280,7 @@ class Transform(ABC):
     outside of e.g. dimensionality-validating its endpoints and composing inside a TransformSequence.
     """
 
+    _ome_zarr_name: Optional[str] = field(default=None, kw_only=True)
     source: Optional[AnyRef] = field(default=None, kw_only=True)
     """The transform graph node (coordinate system) whose coordinates this transform acts on"""
     target: Optional[AnyRef] = field(default=None, kw_only=True)
@@ -309,12 +310,16 @@ class Transform(ABC):
         pass
 
     def __post_init__(self) -> None:
+        if self._ome_zarr_name is not None and (not isinstance(self._ome_zarr_name, str) or not self._ome_zarr_name):
+            raise ValueError(f"Transform name must be a non-empty string. Received: {self._ome_zarr_name!r}")
         self._validate_bound_axes()
 
     def to_ome_zarr(self, version: str, *, nodes_by_path: Optional[NodesByPath] = None) -> Dict[str, Any]:
         ome_zarr_transform_dict = self._get_subtype_ome_zarr_properties(version)
         if version in PRE_TRANSFORMS_VERSIONS:
             return ome_zarr_transform_dict
+        if self._ome_zarr_name is not None:
+            ome_zarr_transform_dict["name"] = self._ome_zarr_name
         source = self.source
         target = self.target
         if source is None or target is None:
@@ -413,7 +418,7 @@ class Transform(ABC):
         t_type = ome_dict.get("type")
         if t_type == "identity":
             source, target = cls._parse_source_and_target(ome_dict)
-            return IdentityTransform(source=source, target=target)
+            return IdentityTransform(_ome_zarr_name=cls._parse_name(ome_dict), source=source, target=target)
         elif t_type == "scale":
             return ScaleTransform.from_ome_zarr(ome_dict)
         elif t_type == "translation":
@@ -422,6 +427,7 @@ class Transform(ABC):
             source, target = cls._parse_source_and_target(ome_dict)
             return TransformSequence(
                 transforms=tuple(Transform.from_ome_zarr(td) for td in ome_dict["transformations"]),
+                _ome_zarr_name=cls._parse_name(ome_dict),
                 source=source,
                 target=target,
             )
@@ -449,6 +455,15 @@ class Transform(ABC):
         source = endpoints["input"]
         target = endpoints["output"]
         return source, target
+
+    @staticmethod
+    def _parse_name(ome_dict: Mapping[str, Any]) -> Optional[str]:
+        name = ome_dict.get("name")
+        if not name:
+            return None
+        if not isinstance(name, str):
+            raise ValueError(f"Invalid metadata: Name must be string. Received: {name!r}")
+        return name
 
     def _validate_bound_axes(self) -> None:
         source_axes = tuple(self.source.owner.axes()) if isinstance(self.source, NodeRef) else None
@@ -568,6 +583,7 @@ class ScaleTransform(Transform):
         return cls(
             scale=scale,
             ome_zarr_path=ome_dict.get("path"),
+            _ome_zarr_name=cls._parse_name(ome_dict),
             source=source,
             target=target,
         )
@@ -634,6 +650,7 @@ class TranslationTransform(Transform):
         return cls(
             translation=translation,
             ome_zarr_path=ome_dict.get("path"),
+            _ome_zarr_name=cls._parse_name(ome_dict),
             source=source,
             target=target,
         )
