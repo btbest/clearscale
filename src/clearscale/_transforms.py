@@ -159,6 +159,22 @@ ResolvedRef = NodeRef[TransformGraphNode]
 AnyRef = Union[ResolvedRef, _UnresolvedRef]
 
 
+def _require_numbers_unless_path(ome_dict: Mapping[str, Any], field_name: str) -> Tuple[float, ...]:
+    """Raises if no numbers, unless 'path' field is set"""
+    raw: Any = ome_dict.get(field_name, ())
+    try:
+        values = tuple(raw)
+    except TypeError:
+        values = ()
+    if not values:
+        if isinstance(ome_dict.get("path"), str) and ome_dict["path"]:
+            return ()
+        raise ValueError(f"Invalid {field_name} transform metadata. Expected sequence of numbers, received: {raw!r}")
+    if not all(isinstance(v, numbers.Real) and not isinstance(v, bool) for v in values):
+        raise ValueError(f"Invalid {field_name} transform metadata. Expected sequence of numbers, received: {raw!r}")
+    return tuple(float(v) for v in values)
+
+
 class CoordinateSystem(_AxisMapping[AxisKey, AxisSemantics], TransformGraphNode):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -532,21 +548,27 @@ class IdentityTransform(Transform):
 
 @dataclass(frozen=True, slots=True)
 class ScaleTransform(Transform):
-    scale: Tuple[float, ...]
-    ome_zarr_path: Optional[str] = None
+    scale: Tuple[float, ...]  # Can be empty if _ome_zarr_path is provided instead
+    _ome_zarr_path: Optional[str] = None
+    """OME-Zarr allows scale with path to a zarr instead of plain values.
+    Nobody uses this in practice.
+    Support round-trip of such metadata, but until anyone actually needs it, we'll accept
+    that such ScaleTransform objects are useless in practice."""
 
     @property
     def is_invertible(self) -> bool:
-        return all(v for v in self.scale)  # Not invertible with 0 values
+        return bool(self.scale) and all(v for v in self.scale)  # Not invertible with 0 values or unloaded values
 
     def inverted(self) -> "ScaleTransform":
         if not self.is_invertible:
-            raise ValueError("ScaleTransform is not invertible: contains zero scale value(s).")
+            raise ValueError("ScaleTransform is not invertible: contains zero or unloaded scale value(s).")
         scale_inverted = tuple(1 / v for v in self.scale)
-        return replace(self, scale=scale_inverted, ome_zarr_path=None)
+        return replace(self, scale=scale_inverted, _ome_zarr_path=None)
 
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
         if not isinstance(earlier, ScaleTransform):
+            return None
+        if not self.scale or not earlier.scale:
             return None
         if not self._endpoints_can_chain_after(earlier):
             return None
@@ -555,14 +577,16 @@ class ScaleTransform(Transform):
             scale=tuple(a * b for a, b in zip(self.scale, earlier.scale)),
             source=self._composed_source(earlier),
             target=self._composed_target(earlier),
-            ome_zarr_path=None,
+            _ome_zarr_path=None,
         )
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
-        payload_dict = {"path": self.ome_zarr_path} if self.ome_zarr_path else {"scale": list(self.scale)}
+        payload_dict = {"path": self._ome_zarr_path} if self._ome_zarr_path else {"scale": list(self.scale)}
         return {"type": "scale", **payload_dict}
 
-    def _ndim_by_payload(self) -> Tuple[int, int]:
+    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+        if not self.scale:
+            return None
         return len(self.scale), len(self.scale)
 
     @classmethod
@@ -571,18 +595,11 @@ class ScaleTransform(Transform):
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "ScaleTransform":
-        raw: Any = ome_dict.get("scale", ())
-        try:
-            scale_values = tuple(raw)
-        except TypeError:
-            scale_values = ()
-        if not scale_values or not all(isinstance(v, numbers.Real) for v in scale_values):
-            raise ValueError(f"Invalid scale transform metadata. Expected sequence of numbers, received: {raw!r}")
-        scale = tuple(float(v) for v in scale_values)
+        scale = _require_numbers_unless_path(ome_dict, "scale")
         source, target = cls._parse_source_and_target(ome_dict)
         return cls(
             scale=scale,
-            ome_zarr_path=ome_dict.get("path"),
+            _ome_zarr_path=ome_dict.get("path"),
             _ome_zarr_name=cls._parse_name(ome_dict),
             source=source,
             target=target,
@@ -601,19 +618,27 @@ class ScaleTransform(Transform):
 
 @dataclass(frozen=True, slots=True)
 class TranslationTransform(Transform):
-    translation: Tuple[float, ...]
-    ome_zarr_path: Optional[str] = None
+    translation: Tuple[float, ...]  # Can be empty if _ome_zarr_path is provided instead
+    _ome_zarr_path: Optional[str] = None
+    """OME-Zarr allows translation with path to a zarr instead of plain values.
+    Nobody uses this in practice.
+    Support round-trip of such metadata, but until anyone actually needs it, we'll accept
+    that such TranslationTransform objects are useless in practice."""
 
     @property
     def is_invertible(self) -> bool:
-        return True
+        return bool(self.translation)
 
     def inverted(self) -> "TranslationTransform":
+        if not self.is_invertible:
+            raise ValueError("TranslationTransform is not invertible: translation values are unloaded.")
         translation_inverted = tuple(-v for v in self.translation)
-        return replace(self, translation=translation_inverted, ome_zarr_path=None)
+        return replace(self, translation=translation_inverted, _ome_zarr_path=None)
 
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
         if not isinstance(earlier, TranslationTransform):
+            return None
+        if not self.translation or not earlier.translation:
             return None
         if not self._endpoints_can_chain_after(earlier):
             return None
@@ -622,14 +647,16 @@ class TranslationTransform(Transform):
             translation=tuple(a + b for a, b in zip(self.translation, earlier.translation)),
             source=self._composed_source(earlier),
             target=self._composed_target(earlier),
-            ome_zarr_path=None,
+            _ome_zarr_path=None,
         )
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
-        payload_dict = {"path": self.ome_zarr_path} if self.ome_zarr_path else {"translation": list(self.translation)}
+        payload_dict = {"path": self._ome_zarr_path} if self._ome_zarr_path else {"translation": list(self.translation)}
         return {"type": "translation", **payload_dict}
 
-    def _ndim_by_payload(self) -> Tuple[int, int]:
+    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+        if not self.translation:
+            return None
         return len(self.translation), len(self.translation)
 
     @classmethod
@@ -638,18 +665,11 @@ class TranslationTransform(Transform):
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "TranslationTransform":
-        raw: Any = ome_dict.get("translation", ())
-        try:
-            translation_values = tuple(raw)
-        except TypeError:
-            translation_values = ()
-        if not translation_values or not all(isinstance(v, numbers.Real) for v in translation_values):
-            raise ValueError(f"Invalid translation transform metadata. Expected sequence of numbers, received: {raw!r}")
-        translation = tuple(float(v) for v in translation_values)
+        translation = _require_numbers_unless_path(ome_dict, "translation")
         source, target = cls._parse_source_and_target(ome_dict)
         return cls(
             translation=translation,
-            ome_zarr_path=ome_dict.get("path"),
+            _ome_zarr_path=ome_dict.get("path"),
             _ome_zarr_name=cls._parse_name(ome_dict),
             source=source,
             target=target,

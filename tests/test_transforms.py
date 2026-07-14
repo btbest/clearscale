@@ -65,6 +65,26 @@ def test_bound_translation_rejects_endpoint_axis_count_mismatch():
         TranslationTransform(translation=(0, 0)).bound(source=source, target=target)
 
 
+def test_path_backed_scale_round_trips_and_no_ndim():
+    scale = Transform.from_ome_zarr({"type": "scale", "path": "coordinateTransformations/scale"})
+
+    assert isinstance(scale, ScaleTransform)
+    assert scale._ndim_by_payload() is None
+    assert not scale.is_invertible
+    assert scale.to_ome_zarr("0.6.dev4") == {"type": "scale", "path": "coordinateTransformations/scale"}
+
+
+def test_path_backed_translation_round_trips_and_no_ndim():
+    translation = Transform.from_ome_zarr({"type": "translation", "path": "coordinateTransformations/translation"})
+    assert isinstance(translation, TranslationTransform)
+    assert translation._ndim_by_payload() is None
+    assert not translation.is_invertible
+    assert translation.to_ome_zarr("0.6.dev4") == {
+        "type": "translation",
+        "path": "coordinateTransformations/translation",
+    }
+
+
 def test_bound_identity_rejects_endpoint_axis_count_mismatch():
     source = _sys_ref("source", "yx")
     target = _sys_ref("target", "zyx")

@@ -162,24 +162,26 @@ class MultiscaleTransforms(TransformSequence):
         translation: Optional[TranslationTransform] = None
         for t_dict in ome_transformations:
             # Best effort: Find first valid combination,
-            # and accept even a valid translation without valid scale
+            # and accept even a valid translation without valid scale,
+            # but reject path-backed scale/translation (because nobody uses it in practice).
+            # If it ever becomes necessary, we'd need an `array_source` param.
             try:
                 t = Transform.from_ome_zarr(t_dict)
             except ValueError:
                 continue
             if isinstance(t, TransformSequence):
-                if len(t) == 1 and isinstance(t[0], ScaleTransform):
+                if len(t) == 1 and isinstance(t[0], ScaleTransform) and t[0].scale:
                     scale = t[0]
                     continue
                 if len(t) == 2 and isinstance(t[0], ScaleTransform) and isinstance(t[1], TranslationTransform):
-                    scale = t[0]
-                    translation = t[1]
+                    scale = t[0] if t[0].scale else None
+                    translation = t[1] if t[1].translation else None
                     break
             if isinstance(t, ScaleTransform) and scale is None:
-                scale = t
+                scale = t if t.scale else None
                 continue
             if isinstance(t, TranslationTransform) and translation is None:
-                translation = t
+                translation = t if t.translation else None
                 if scale:
                     break
                 continue
@@ -187,7 +189,9 @@ class MultiscaleTransforms(TransformSequence):
             return None
         elif scale is None:
             assert isinstance(translation, TranslationTransform), "should've made sure by now"
-            scale = ScaleTransform(scale=tuple(1.0 for _ in range(translation._ndim_by_payload()[0])))
+            ndim = translation._ndim_by_payload()
+            assert ndim is not None, "should've made sure translation values actually exist"
+            scale = ScaleTransform(scale=tuple(1.0 for _ in range(ndim[0])))
         return cls(transforms=(scale,) if translation is None else (scale, translation))
 
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
