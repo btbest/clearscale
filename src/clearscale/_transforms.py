@@ -175,6 +175,32 @@ def _require_numbers_unless_path(ome_dict: Mapping[str, Any], field_name: str) -
     return tuple(float(v) for v in values)
 
 
+def _require_int_or_empty_tuple(value: Any, field_name: str, *, transform_type: str) -> Tuple[int, ...]:
+    try:
+        items = tuple(value)
+    except TypeError:
+        raise ValueError(
+            f"Invalid {transform_type} transform metadata. Expected integer sequence in {field_name!r}, "
+            f"received: {value!r}"
+        )
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in items):
+        raise ValueError(
+            f"Invalid {transform_type} transform metadata. Expected integer sequence in {field_name!r}, "
+            f"received: {value!r}"
+        )
+    if any(v < 0 for v in items):
+        raise ValueError(
+            f"Invalid {transform_type} transform metadata. Axis indices must be non-negative, received: {items!r}"
+        )
+    return items
+
+
+def _covers_all_indices(values: Iterable[int]) -> bool:
+    """Whether `values` contains every index of an array as long as itself"""
+    values = tuple(values)
+    return set(values) == set(range(len(values)))
+
+
 class CoordinateSystem(_AxisMapping[AxisKey, AxisSemantics], TransformGraphNode):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -439,6 +465,8 @@ class Transform(ABC):
             return ScaleTransform.from_ome_zarr(ome_dict)
         elif t_type == "translation":
             return TranslationTransform.from_ome_zarr(ome_dict)
+        elif t_type == "mapAxis":
+            return MapAxisTransform.from_ome_zarr(ome_dict)
         elif t_type == "sequence":
             source, target = cls._parse_source_and_target(ome_dict)
             return TransformSequence(
@@ -685,6 +713,61 @@ class TranslationTransform(Transform):
                 f"received {len(axes)}: {list(axes)}"
             )
         return Translation(zip(axes, self.translation))
+
+
+@dataclass(frozen=True, slots=True)
+class MapAxisTransform(Transform):
+    """MapAxisTransform represents a pure transposition (no drops or inserts)"""
+
+    map_axis: Tuple[int, ...]
+
+    @property
+    def is_invertible(self) -> bool:
+        """Map-axis is not allowed to drop axes, so it's always invertible"""
+        return True
+
+    def inverted(self) -> "MapAxisTransform":
+        inverted_map = [0] * len(self.map_axis)
+        for output_index, input_index in enumerate(self.map_axis):
+            inverted_map[input_index] = output_index
+        return replace(self, map_axis=tuple(inverted_map), source=self.target, target=self.source)
+
+    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
+        if not isinstance(earlier, MapAxisTransform):
+            return None
+        if not self._endpoints_can_chain_after(earlier):
+            return None
+        return replace(
+            self,
+            map_axis=tuple(earlier.map_axis[i] for i in self.map_axis),
+            source=self._composed_source(earlier),
+            target=self._composed_target(earlier),
+        )
+
+    def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
+        return {"type": "mapAxis", "mapAxis": list(self.map_axis)}
+
+    def _ndim_by_payload(self) -> Tuple[int, int]:
+        return len(self.map_axis), len(self.map_axis)
+
+    @classmethod
+    def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "MapAxisTransform":
+        source, target = cls._parse_source_and_target(ome_dict)
+        return cls(
+            map_axis=_require_int_or_empty_tuple(ome_dict.get("mapAxis", ()), "mapAxis", transform_type="mapAxis"),
+            _ome_zarr_name=cls._parse_name(ome_dict),
+            source=source,
+            target=target,
+        )
+
+    def __post_init__(self):
+        map_axis = _require_int_or_empty_tuple(self.map_axis, "map_axis", transform_type="MapAxisTransform")
+        if not map_axis:
+            raise ValueError("MapAxisTransform requires a non-empty axis permutation.")
+        if not _covers_all_indices(map_axis):
+            raise ValueError(f"MapAxisTransform must include all zero-based indices. Received: {map_axis!r}")
+        object.__setattr__(self, "map_axis", map_axis)
+        Transform.__post_init__(self)
 
 
 @dataclass(frozen=True, slots=True)

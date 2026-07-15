@@ -6,6 +6,7 @@ from clearscale import Multiscale, Scale, Shape
 from clearscale._transforms import (
     CoordinateSystem,
     IdentityTransform,
+    MapAxisTransform,
     ScaleTransform,
     TransformSequence,
     TranslationTransform,
@@ -104,6 +105,78 @@ def test_resolving_transform_revalidates_endpoint_axes():
 
     with pytest.raises(ValueError, match="TranslationTransform expects 2 source axes"):
         transform.with_resolved({"tile_0": multiscale})
+
+
+@pytest.mark.parametrize(
+    "original, inverse",
+    [
+        ((0,), (0,)),
+        ((0, 1), (0, 1)),
+        ((1, 0), (1, 0)),
+        ((0, 1, 2), (0, 1, 2)),
+        ((0, 2, 1), (0, 2, 1)),
+        ((1, 0, 2), (1, 0, 2)),
+        ((1, 2, 0), (2, 0, 1)),
+        ((2, 0, 1), (1, 2, 0)),
+        ((2, 1, 0), (2, 1, 0)),
+        ((0, 1, 2, 3), (0, 1, 2, 3)),
+        ((3, 0, 1, 2), (1, 2, 3, 0)),
+        ((2, 3, 0, 1), (2, 3, 0, 1)),
+        ((0, 2, 1, 3), (0, 2, 1, 3)),
+    ],
+)
+def test_map_axis_inverted(original, inverse):
+    """
+    Basically whenever it's a flip (0, 2, 1), the inverse is the same flip.
+    If it's a shift but same order (1, 2, 3, 0), the inverse is the opposite shift
+    """
+    transform = MapAxisTransform(original)
+
+    assert transform.inverted().map_axis == inverse
+
+
+@pytest.mark.parametrize(
+    "earlier, later, composed",
+    [
+        ((0,), (0,), (0,)),
+        ((0, 1), (0, 1), (0, 1)),
+        ((0, 1), (1, 0), (1, 0)),
+        ((1, 0), (0, 1), (1, 0)),
+        ((1, 0), (1, 0), (0, 1)),
+        ((0, 1, 2), (0, 1, 2), (0, 1, 2)),
+        ((0, 2, 1), (0, 2, 1), (0, 1, 2)),  # flip + inverse flip
+        ((1, 0, 2), (0, 2, 1), (1, 2, 0)),  # flip + flip
+        ((1, 2, 0), (0, 2, 1), (1, 0, 2)),  # shift + flip
+        ((1, 2, 0), (1, 2, 0), (2, 0, 1)),  # shift + shift
+        ((0, 1, 2, 3), (0, 1, 2, 3), (0, 1, 2, 3)),
+        ((3, 0, 1, 2), (1, 2, 3, 0), (0, 1, 2, 3)),
+        ((0, 2, 1, 3), (0, 2, 1, 3), (0, 1, 2, 3)),
+        ((3, 0, 1, 2), (3, 0, 1, 2), (2, 3, 0, 1)),  # shift + shift
+        ((3, 0, 1, 2), (0, 2, 1, 3), (3, 1, 0, 2)),  # shift + flip
+    ],
+)
+def test_map_axis_composed(earlier, later, composed):
+    """
+    Composing a map-axis with its inverse results in identity (0, 1, 2, ...).
+    Otherwise, combine the respective flips and shifts.
+    """
+    earlier = MapAxisTransform(earlier)
+    later = MapAxisTransform(later)
+
+    assert later.composed_with(earlier) == MapAxisTransform(composed)
+
+
+def test_map_axis_rejects_missing_transpose():
+    with pytest.raises(ValueError, match="must include all zero-based indices"):
+        _ = MapAxisTransform((0, 2))  # 1 is missing (MapAxis isn't allowed to drop)
+
+
+def test_map_axis_rejects_mismatching_dims():
+    source = _sys_ref("source", "cyx")
+    bad_target = _sys_ref("target", "yx")
+
+    with pytest.raises(ValueError, match="expects 3 target axes"):
+        _ = MapAxisTransform((0, 1, 2), source=source, target=bad_target)
 
 
 def test_transform_sequence_rejects_mismatched_axis_value_counts():
