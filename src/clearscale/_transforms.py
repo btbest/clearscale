@@ -201,6 +201,11 @@ def _covers_all_indices(values: Iterable[int]) -> bool:
     return set(values) == set(range(len(values)))
 
 
+def _validate_unique(values: Tuple[int, ...], field_name: str) -> None:
+    if len(set(values)) != len(values):
+        raise ValueError(f"Invalid transform. Expected unique indices in {field_name}, received: {values!r}")
+
+
 class CoordinateSystem(_AxisMapping[AxisKey, AxisSemantics], TransformGraphNode):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -351,6 +356,12 @@ class Transform(ABC):
         The common properties (input/output) are handled in the base class."""
         pass
 
+    @staticmethod
+    def _source_ndim_always_eq_target_ndim() -> bool:
+        """For most transform types, this is True.
+        Only ProjectAxisTransform and ByDimensionTransform can modify ndim."""
+        return True
+
     def __post_init__(self) -> None:
         if self._ome_zarr_name is not None and (not isinstance(self._ome_zarr_name, str) or not self._ome_zarr_name):
             raise ValueError(f"Transform name must be a non-empty string. Received: {self._ome_zarr_name!r}")
@@ -467,6 +478,8 @@ class Transform(ABC):
             return TranslationTransform.from_ome_zarr(ome_dict)
         elif t_type == "mapAxis":
             return MapAxisTransform.from_ome_zarr(ome_dict)
+        elif t_type == "projectAxis":
+            return ProjectAxisTransform.from_ome_zarr(ome_dict)
         elif t_type == "sequence":
             source, target = cls._parse_source_and_target(ome_dict)
             return TransformSequence(
@@ -527,11 +540,17 @@ class Transform(ABC):
                     f"coordinate system has {len(target_axes)}: {list(target_axes)}"
                 )
 
-        if source_axes is not None and target_axes is not None and len(source_axes) != len(target_axes):
-            # Payload gives no axis information -> source and target must be equal dimensionality.
-            # Transform types that change axis number must provide explicit source/target_ndim.
+        if (
+            ndim is None
+            and self._source_ndim_always_eq_target_ndim()
+            and source_axes is not None
+            and target_axes is not None
+            and len(source_axes) != len(target_axes)
+        ):
+            # Payload gives no axis information.
+            # `_source_ndim_always_eq_target_ndim` says source and target must be equal dimensionality.
             raise ValueError(
-                f"{self.__class__.__name__} endpoints have incompatible dimensionality: "
+                f"{self.__class__.__name__} source and target must be same dimensionality: "
                 f"source {list(source_axes)} vs target {list(target_axes)}"
             )
 
@@ -771,6 +790,150 @@ class MapAxisTransform(Transform):
 
 
 @dataclass(frozen=True, slots=True)
+class ProjectAxisTransform(Transform):
+    """ProjectAxisTransform represents axis dropping and insertion"""
+
+    drops: Tuple[int, ...] = field(default=())
+    """Indices of source axes dropped.
+    E.g. if source is 'xyz' and target is 'xz', the connecting ProjectAxisTransform has drops=(1,)"""
+    inserts: Tuple[int, ...] = field(default=())
+    """Indices of *target* axes that are new insertions.
+    E.g. if source is 'yx' and target is 'cyx', the connecting ProjectAxisTransform has inserts=(0,)"""
+
+    @property
+    def is_invertible(self) -> bool:
+        """Axis dropping is not invertible"""
+        return not self.drops
+
+    def inverted(self) -> "Transform":
+        if self.drops:
+            raise ValueError(f"Axis dropping is not invertible. This transform drops axes {self.drops!r}.")
+        return replace(self, drops=self.inserts, source=self.target, target=self.source)
+
+    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
+        """
+        Composing ProjectAxisTransform is done by projecting implicit earlier.source axis indices
+        into the intermediate (earlier.target / self.source), then adding self's own drops/adds.
+        None represents inserted axes (None because these have no corresponding source axis index).
+        """
+        if not isinstance(earlier, ProjectAxisTransform):
+            return None
+        if not self._endpoints_can_chain_after(earlier):
+            return None
+
+        highest_known_earlier_src_axis = max(earlier.drops, default=-1)
+        intermediate_axes: List[Optional[int]] = [
+            i for i in range(highest_known_earlier_src_axis + 1) if i not in earlier.drops
+        ]
+        next_source_axis = highest_known_earlier_src_axis + 1
+        for inserted in sorted(earlier.inserts):
+            while len(intermediate_axes) < inserted:
+                # `inserted` implies additional source axes we didn't know from the drops
+                intermediate_axes.append(next_source_axis)
+                next_source_axis += 1
+            intermediate_axes.insert(inserted, None)
+
+        # intermediate_axes is now something like e.g. [0, None] for "drop 1, insert 1".
+        dropped_from_earlier_source: List[int] = list(earlier.drops)
+        for drop in self.drops:
+            while len(intermediate_axes) <= drop:
+                # This `drop` on self (later transform) implies there must've been more axes on earlier.source
+                intermediate_axes.append(next_source_axis)
+                next_source_axis += 1
+            dropped_source = intermediate_axes[drop]
+            if dropped_source is not None:
+                dropped_from_earlier_source.append(dropped_source)
+
+        # intermediate_axes now already contains any earlier.source axes implied by self.drops
+        self_target_axes: List[Optional[int]] = [
+            axis for i, axis in enumerate(intermediate_axes) if i not in self.drops
+        ]
+        for inserted in sorted(self.inserts):
+            while len(self_target_axes) < inserted:
+                self_target_axes.append(1337)  # The actual value doesn't matter anymore, just that it wasn't an insert
+            self_target_axes.insert(inserted, None)
+        inserted_overall = [i for i, axis in enumerate(self_target_axes) if axis is None]
+
+        return replace(
+            self,
+            drops=sorted(dropped_from_earlier_source),
+            inserts=inserted_overall,
+            source=self._composed_source(earlier),
+            target=self._composed_target(earlier),
+        )
+
+    def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
+        return {
+            "type": "projectAxis",
+            "droppedInputs": list(self.drops),
+            "createdOutputs": list(self.inserts),
+        }
+
+    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+        # The payload can only imply a *minimum* axis count. That's not helpful for callers here.
+        return None
+
+    @staticmethod
+    def _source_ndim_always_eq_target_ndim() -> bool:
+        return False
+
+    @classmethod
+    def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "ProjectAxisTransform":
+        source, target = cls._parse_source_and_target(ome_dict)
+        return cls(
+            drops=_require_int_or_empty_tuple(
+                ome_dict.get("droppedInputs", ()), "droppedInputs", transform_type="projectAxis"
+            ),
+            inserts=_require_int_or_empty_tuple(
+                ome_dict.get("createdOutputs", ()), "createdOutputs", transform_type="projectAxis"
+            ),
+            _ome_zarr_name=cls._parse_name(ome_dict),
+            source=source,
+            target=target,
+        )
+
+    def __post_init__(self):
+        drops = _require_int_or_empty_tuple(self.drops, "drops", transform_type="ProjectAxisTransform")
+        inserts = _require_int_or_empty_tuple(self.inserts, "inserts", transform_type="ProjectAxisTransform")
+        _validate_unique(drops, "ProjectAxisTransform.drops")
+        _validate_unique(inserts, "ProjectAxisTransform.inserts")
+        object.__setattr__(self, "drops", drops)
+        object.__setattr__(self, "inserts", inserts)
+        Transform.__post_init__(self)
+
+    def _validate_bound_axes(self) -> None:
+        source_axes = tuple(self.source.owner.axes()) if isinstance(self.source, NodeRef) else None
+        target_axes = tuple(self.target.owner.axes()) if isinstance(self.target, NodeRef) else None
+
+        if source_axes is not None:
+            source_ndim = len(source_axes)
+            if any(index >= source_ndim for index in self.drops):
+                raise ValueError(
+                    f"ProjectAxisTransform drops input index outside source axes {list(source_axes)}: "
+                    f"{self.drops!r}"
+                )
+        else:
+            source_ndim = None
+
+        if target_axes is not None:
+            target_ndim = len(target_axes)
+            if any(index >= target_ndim for index in self.inserts):
+                raise ValueError(
+                    f"ProjectAxisTransform inserts output index outside target axes {target_axes}: {self.inserts!r}"
+                )
+        else:
+            target_ndim = None
+
+        if source_ndim is not None and target_ndim is not None:
+            expected_target_ndim = source_ndim - len(self.drops) + len(self.inserts)
+            if expected_target_ndim != target_ndim:
+                raise ValueError(
+                    f"ProjectAxisTransform expects {expected_target_ndim} target axes from source axes "
+                    f"{source_axes} but target coordinate system has {target_ndim}: {target_axes}"
+                )
+
+
+@dataclass(frozen=True, slots=True)
 class TransformSequence(Transform):
     transforms: Tuple[Transform, ...] = field(default=())
 
@@ -886,6 +1049,9 @@ class TransformSequence(Transform):
         for transform in self.transforms:
             ndim = transform._ndim_by_payload()
             if ndim is None:
+                if not transform._source_ndim_always_eq_target_ndim():
+                    earlier_target_ndim = None
+                    earlier = None
                 continue
 
             source_ndim, target_ndim = ndim

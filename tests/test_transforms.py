@@ -7,6 +7,7 @@ from clearscale._transforms import (
     CoordinateSystem,
     IdentityTransform,
     MapAxisTransform,
+    ProjectAxisTransform,
     ScaleTransform,
     TransformSequence,
     TranslationTransform,
@@ -90,7 +91,7 @@ def test_bound_identity_rejects_endpoint_axis_count_mismatch():
     source = _sys_ref("source", "yx")
     target = _sys_ref("target", "zyx")
 
-    with pytest.raises(ValueError, match="IdentityTransform endpoints have incompatible dimensionality"):
+    with pytest.raises(ValueError, match="source and target must be same dimensionality"):
         IdentityTransform().bound(source=source, target=target)
 
 
@@ -179,6 +180,82 @@ def test_map_axis_rejects_mismatching_dims():
         _ = MapAxisTransform((0, 1, 2), source=source, target=bad_target)
 
 
+def test_project_axis_matches_differing_endpoint_ndim():
+    source = _sys_ref("source", "cyx")
+    target = _sys_ref("target", "ij")
+
+    _ = ProjectAxisTransform(drops=(0,), source=source, target=target)
+
+
+@pytest.mark.parametrize(
+    "earlier, later, composed",
+    [  # three tuples of (drop, create)
+        (((), ()), ((), ()), ((), ())),
+        (((0,), ()), ((), ()), ((0,), ())),
+        (((), (2,)), ((), ()), ((), (2,))),
+        (((), ()), ((1,), ()), ((1,), ())),
+        (((), ()), ((), (3,)), ((), (3,))),
+        (((0,), ()), ((0,), ()), ((0, 1), ())),
+        (((), (0,)), ((), (0,)), ((), (0, 1))),
+        (((), (0,)), ((), (3,)), ((), (0, 3))),
+        (((), (1,)), ((), (5,)), ((), (1, 5))),
+        (((), ()), ((3,), ()), ((3,), ())),
+        (((2,), ()), ((), (4,)), ((2,), (4,))),
+        (((0,), (0,)), ((0,), (0,)), ((0,), (0,))),
+        (((0,), (0,)), ((0,), ()), ((0,), ())),
+        (((3,), (1,)), ((0,), (0,)), ((0, 3), (0, 1))),
+        (((1,), (3,)), ((0,), (3,)), ((0, 1), (2, 3))),
+        (((1,), (3,)), ((1,), (3,)), ((1, 2), (2, 3))),
+        (((0, 1, 4), (3,)), ((3, 4), ()), ((0, 1, 4, 6), ())),
+        (((), (0, 1)), ((), (0, 5)), ((), (0, 1, 2, 5))),
+    ],
+)
+def test_project_axis_composed(earlier, later, composed):
+    """
+    Composing a project-axis needs to trace `earlier`'s source axes through its dropping and
+    insertions, to determine which of them are subsequently dropped by `later`,
+    and which axes of the final result are newly created across both transforms.
+    """
+    earlier_t = ProjectAxisTransform(drops=earlier[0], inserts=earlier[1])
+    later_t = ProjectAxisTransform(drops=later[0], inserts=later[1])
+
+    composed_t = later_t.composed_with(earlier_t)
+    assert isinstance(composed_t, ProjectAxisTransform)
+    assert composed_t.drops == composed[0]
+    assert composed_t.inserts == composed[1]
+
+
+def test_project_axis_rejects_duplicates():
+    with pytest.raises(ValueError, match="Expected unique indices"):
+        _ = ProjectAxisTransform(drops=(1, 1))
+    with pytest.raises(ValueError, match="Expected unique indices"):
+        _ = ProjectAxisTransform(inserts=(1, 1))
+
+
+def test_project_axis_rejects_mismatching_dims():
+    source = _sys_ref("source", "cyx")
+    bad_target = _sys_ref("target", "yx")
+
+    with pytest.raises(ValueError, match="expects 3 target axes"):
+        ProjectAxisTransform(drops=(0,), inserts=(0,), source=source, target=bad_target)
+
+
+def test_project_axis_rejects_create_index_out_of_bounds():
+    source = _sys_ref("source", "cyx")
+    target = _sys_ref("target", "yxi")
+
+    with pytest.raises(ValueError, match="inserts output index outside target axes"):
+        _ = ProjectAxisTransform(inserts=(2, 3), source=source, target=target)
+
+
+def test_project_axis_rejects_drop_index_out_of_bounds():
+    source = _sys_ref("source", "cyx")
+    target = _sys_ref("target", "yx")
+
+    with pytest.raises(ValueError, match="drops input index outside source axes"):
+        _ = ProjectAxisTransform(drops=(3,), source=source, target=target)
+
+
 def test_transform_sequence_rejects_mismatched_axis_value_counts():
     with pytest.raises(
         ValueError,
@@ -194,7 +271,7 @@ def test_bound_transform_sequence_rejects_endpoint_axis_count_mismatch():
     target = _sys_ref("target", "zyx")
     sequence = TransformSequence((IdentityTransform(), IdentityTransform()))
 
-    with pytest.raises(ValueError, match="TransformSequence endpoints have incompatible dimensionality"):
+    with pytest.raises(ValueError, match="source and target must be same dimensionality"):
         sequence.bound(source=source, target=target)
 
 
@@ -214,7 +291,7 @@ def test_transform_sequence_rejects_endpoint_mismatch_inferred_through_identity(
     target = _sys_ref("target", "yx")
     sequence = TransformSequence((IdentityTransform(), IdentityTransform(), TranslationTransform(translation=(0, 0))))
 
-    with pytest.raises(ValueError, match="TransformSequence endpoints have incompatible dimensionality"):
+    with pytest.raises(ValueError, match="source and target must be same dimensionality"):
         sequence.bound(source=source, target=target)
 
 
@@ -225,6 +302,16 @@ def test_transform_sequence_accepts_consistent_dimensionality_through_identity()
             IdentityTransform(),
             IdentityTransform(),
             TranslationTransform(translation=(0, 0)),
+        )
+    )
+
+
+def test_transform_sequence_allows_dimension_change_through_project_axis():
+    _ = TransformSequence(
+        (
+            ScaleTransform((1, 1, 1)),
+            ProjectAxisTransform(drops=(0,)),
+            ScaleTransform((2, 2)),
         )
     )
 
