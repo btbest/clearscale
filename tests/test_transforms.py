@@ -4,6 +4,7 @@ import pytest
 
 from clearscale import Multiscale, Scale, Shape
 from clearscale._transforms import (
+    BijectionTransform,
     CoordinateSystem,
     IdentityTransform,
     MapAxisTransform,
@@ -254,6 +255,86 @@ def test_project_axis_rejects_drop_index_out_of_bounds():
 
     with pytest.raises(ValueError, match="drops input index outside source axes"):
         _ = ProjectAxisTransform(drops=(3,), source=source, target=target)
+
+
+def test_bijection_infers_endpoints_from_child():
+    source = _sys_ref("source", "cyx")
+    target = _sys_ref("target", "cyx")
+    forward = ScaleTransform((1.0, 2.0, 2.0))
+    inverse = ScaleTransform((1.0, 0.5, 0.5))
+
+    forward_with_source = forward.bound(source=source, target=None)
+    forward_with_target = forward.bound(source=None, target=target)
+    source_from_fwd = BijectionTransform(forward=forward_with_source, inverse=inverse, target=target)
+    target_from_fwd = BijectionTransform(forward=forward_with_target, inverse=inverse, source=source)
+    assert source_from_fwd.source == target_from_fwd.source
+    assert source_from_fwd.target == target_from_fwd.target
+
+    neither_from_child = BijectionTransform(forward=forward, inverse=inverse, target=target, source=source)
+    assert source_from_fwd.source == neither_from_child.source
+    assert source_from_fwd.target == neither_from_child.target
+
+    inverse_with_source = inverse.bound(source=target, target=None)
+    inverse_with_target = inverse.bound(source=None, target=source)
+    source_from_inv = BijectionTransform(forward=forward, inverse=inverse_with_target, target=target)
+    assert source_from_fwd.source == source_from_inv.source
+    target_from_inv = BijectionTransform(forward=forward, inverse=inverse_with_source, source=source)
+    assert source_from_fwd.target == target_from_inv.target
+
+
+def test_bijection_composed_with_scale():
+    earlier = ScaleTransform((2.0,))
+    bijection = BijectionTransform(forward=ScaleTransform((2.0,)), inverse=ScaleTransform((0.5,)))
+
+    composed = bijection.composed_with(earlier)
+    assert composed == BijectionTransform(forward=ScaleTransform((4.0,)), inverse=ScaleTransform((0.25,)))
+
+
+def test_bijection_composed_with_bijection():
+    earlier = BijectionTransform(forward=ScaleTransform((2.0,)), inverse=ScaleTransform((0.5,)))
+    later = BijectionTransform(forward=ScaleTransform((2.0,)), inverse=ScaleTransform((0.5,)))
+
+    composed = later.composed_with(earlier)
+    assert isinstance(composed, BijectionTransform)
+    assert composed.forward == later.forward.composed_with(earlier.forward)
+    assert composed.inverse == earlier.inverse.composed_with(later.inverse)
+
+
+def test_bijection_composition_commutes_with_inversion():
+    """(E∘F) ** −1 = (F ** −1) ∘ (E ** −1) (This should really hold for any combination of composable transforms)"""
+    earlier = BijectionTransform(forward=ScaleTransform((2.0,)), inverse=ScaleTransform((0.5,)))
+    later = BijectionTransform(forward=ScaleTransform((3.0,)), inverse=ScaleTransform((1 / 3,)))
+
+    composed = later.composed_with(earlier)
+    assert composed is not None
+
+    compose_then_invert = composed.inverted()
+    invert_then_compose = earlier.inverted().composed_with(later.inverted())
+
+    assert compose_then_invert == invert_then_compose
+
+
+def test_bijection_rejects_mismatching_child_endpoint():
+    source = _sys_ref("source", "cyx")
+    other_source = _sys_ref("source", "cyx")  # value-equal but not identical
+
+    with pytest.raises(ValueError, match="BijectionTransform endpoint does not match parent endpoint"):
+        _ = BijectionTransform(
+            forward=IdentityTransform(source=source), inverse=IdentityTransform(), source=other_source
+        )
+
+
+def test_bijection_transform_validates_inverse_dimensionality():
+    with pytest.raises(ValueError, match="forward and inverse dimensionality disagree"):
+        BijectionTransform(
+            forward=ScaleTransform(scale=(1, 1, 1)),
+            inverse=ScaleTransform(scale=(1, 1)),
+        )
+
+
+def test_bijection_rejects_project_axis():
+    with pytest.raises(ValueError, match="ProjectAxisTransforms cannot be used in BijectionTransform"):
+        _ = BijectionTransform(forward=ProjectAxisTransform(), inverse=ProjectAxisTransform())
 
 
 def test_transform_sequence_rejects_mismatched_axis_value_counts():

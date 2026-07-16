@@ -488,6 +488,8 @@ class Transform(ABC):
                 source=source,
                 target=target,
             )
+        elif t_type == "bijection":
+            return BijectionTransform.from_ome_zarr(ome_dict)
         else:
             raise ValueError(f"Unknown transform type: {t_type!r}")
 
@@ -1065,6 +1067,150 @@ class TransformSequence(Transform):
 
             earlier_target_ndim = target_ndim
             earlier = transform
+
+
+@dataclass(frozen=True, slots=True)
+class BijectionTransform(Transform):
+    """Provides an explicit way to state the inversion of a normally not-invertible transform."""
+
+    forward: Transform
+    inverse: Transform
+
+    @property
+    def is_invertible(self) -> bool:
+        return True
+
+    def inverted(self) -> "BijectionTransform":
+        return replace(
+            self,
+            forward=self.inverse,
+            inverse=self.forward,
+            source=self.target,
+            target=self.source,
+        )
+
+    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
+        if not self._endpoints_can_chain_after(earlier):
+            return None
+
+        if isinstance(earlier, BijectionTransform):
+            forward = self.forward.composed_with(earlier.forward)
+            if forward is None:
+                return None
+
+            inverse = earlier.inverse.composed_with(self.inverse)
+            if inverse is None:
+                return None
+        else:
+            forward = self.forward.composed_with(earlier)
+            if forward is None:
+                return None
+
+            inverse = earlier.inverted().composed_with(self.inverse)
+            if inverse is None:
+                return None
+
+        return replace(
+            self,
+            forward=forward,
+            inverse=inverse,
+            source=self._composed_source(earlier),
+            target=self._composed_target(earlier),
+        )
+
+    def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
+        return {
+            "type": "bijection",
+            "forward": self.forward.to_ome_zarr(version),
+            "inverse": self.inverse.to_ome_zarr(version),
+        }
+
+    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+        forward_ndim = self.forward._ndim_by_payload()
+        if forward_ndim is not None:
+            return forward_ndim
+        inverse_ndim = self.inverse._ndim_by_payload()
+        if inverse_ndim is not None:
+            return inverse_ndim[1], inverse_ndim[0]
+        return None
+
+    @classmethod
+    def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "BijectionTransform":
+        source, target = cls._parse_source_and_target(ome_dict)
+        forward_dict = ome_dict.get("forward")
+        inverse_dict = ome_dict.get("inverse")
+        if not isinstance(forward_dict, MappingABC) or not isinstance(inverse_dict, MappingABC):
+            raise ValueError(f"Invalid bijection transform metadata. Received: {ome_dict!r}")
+        return cls(
+            forward=Transform.from_ome_zarr(forward_dict),
+            inverse=Transform.from_ome_zarr(inverse_dict),
+            _ome_zarr_name=cls._parse_name(ome_dict),
+            source=source,
+            target=target,
+        )
+
+    def __post_init__(self):
+        if not isinstance(self.forward, Transform) or not isinstance(self.inverse, Transform):
+            raise ValueError("BijectionTransform forward and inverse must be Transform instances.")
+        if isinstance(self.forward, ProjectAxisTransform) or isinstance(self.inverse, ProjectAxisTransform):
+            # Unless the ProjectAxis is a noop, one of the directions destroys information by dropping axes.
+            # Specifying them as inverses of each other is always semantically inaccurate.
+            # Just forbid using it. If necessary for convenience, the noop could be allowed.
+            raise ValueError("ProjectAxisTransforms cannot be used in BijectionTransform.")
+        self._infer_endpoints_from_children()
+        self._validate_child_endpoints()
+        self._validate_child_dimensionality()
+        Transform.__post_init__(self)
+
+    def _validate_bound_axes(self) -> None:
+        ndim = self._ndim_by_payload()
+        if ndim is not None and ndim[0] != ndim[1]:
+            raise ValueError(f"BijectionTransform requires equal input and output dimensionality. Received: {ndim!r}")
+
+        Transform._validate_bound_axes(self)
+
+        source_axes = tuple(self.source.owner.axes()) if isinstance(self.source, NodeRef) else None
+        target_axes = tuple(self.target.owner.axes()) if isinstance(self.target, NodeRef) else None
+        if source_axes is not None and target_axes is not None and len(source_axes) != len(target_axes):
+            raise ValueError(
+                f"BijectionTransform endpoints have incompatible dimensionality: "
+                f"source {list(source_axes)} vs target {list(target_axes)}"
+            )
+
+    def _infer_endpoints_from_children(self) -> None:
+        if self.source is None and self.forward.source is not None:
+            object.__setattr__(self, "source", self.forward.source)
+        if self.target is None and self.forward.target is not None:
+            object.__setattr__(self, "target", self.forward.target)
+        if self.source is None and self.inverse.target is not None:
+            object.__setattr__(self, "source", self.inverse.target)
+        if self.target is None and self.inverse.source is not None:
+            object.__setattr__(self, "target", self.inverse.source)
+
+    def _validate_child_endpoints(self) -> None:
+        expectations = (
+            ("forward input", self.forward.source, self.source),
+            ("forward output", self.forward.target, self.target),
+            ("inverse input", self.inverse.source, self.target),
+            ("inverse output", self.inverse.target, self.source),
+        )
+        for label, actual, expected in expectations:
+            if actual is not None and expected is not None and actual != expected:
+                raise ValueError(
+                    f"BijectionTransform endpoint does not match parent endpoint. "
+                    f"Received {label}: (ID {id(actual)}) {actual!r}, "
+                    f"vs parent: (ID {id(expected)}) {expected!r}"
+                )
+
+    def _validate_child_dimensionality(self) -> None:
+        forward_ndim = self.forward._ndim_by_payload()
+        inverse_ndim = self.inverse._ndim_by_payload()
+        if forward_ndim is not None and inverse_ndim is not None:
+            if forward_ndim[0] != inverse_ndim[1] or forward_ndim[1] != inverse_ndim[0]:
+                raise ValueError(
+                    "BijectionTransform forward and inverse dimensionality disagree: "
+                    f"forward={forward_ndim!r}, inverse={inverse_ndim!r}"
+                )
 
 
 def _ordered_unique_refs(refs: Iterable[_RefT]) -> Tuple[_RefT, ...]:
