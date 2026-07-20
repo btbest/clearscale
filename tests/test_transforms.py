@@ -1,15 +1,23 @@
 import re
+from typing import cast
 
 import pytest
 
 from clearscale import Multiscale, Scale, Shape
 from clearscale._transforms import (
     BijectionTransform,
+    ByDimensionTransform,
+    _ByDimensionChild,
     CoordinateSystem,
     IdentityTransform,
     MapAxisTransform,
     ProjectAxisTransform,
     ScaleTransform,
+    RotationTransform,
+    AffineTransform,
+    CoordinatesTransform,
+    DisplacementsTransform,
+    Transform,
     TransformSequence,
     TranslationTransform,
     TransformGraph,
@@ -335,6 +343,322 @@ def test_bijection_transform_validates_inverse_dimensionality():
 def test_bijection_rejects_project_axis():
     with pytest.raises(ValueError, match="ProjectAxisTransforms cannot be used in BijectionTransform"):
         _ = BijectionTransform(forward=ProjectAxisTransform(), inverse=ProjectAxisTransform())
+
+
+@pytest.mark.parametrize(
+    "children",
+    [
+        pytest.param(
+            (
+                _ByDimensionChild(source_indices=(0,), target_indices=(0,), transform=IdentityTransform()),
+                _ByDimensionChild(source_indices=(0,), target_indices=(1,), transform=IdentityTransform()),
+            ),
+            id="duplicate-source-axis",
+        ),
+        pytest.param(
+            (
+                _ByDimensionChild(source_indices=(0,), target_indices=(0,), transform=IdentityTransform()),
+                _ByDimensionChild(source_indices=(2,), target_indices=(1,), transform=IdentityTransform()),
+            ),
+            id="non-contiguous-source-axes",
+        ),
+    ],
+)
+def test_by_dimension_accepts_duplicate_or_non_consecutive_source_indices(children):
+    _ = ByDimensionTransform(transforms=children)
+
+
+@pytest.mark.parametrize(
+    ("children", "expected_error"),
+    [
+        pytest.param((), "requires at least one child transformation", id="empty"),
+        pytest.param(
+            (
+                _ByDimensionChild(source_indices=(0,), target_indices=(0,), transform=IdentityTransform()),
+                _ByDimensionChild(source_indices=(1,), target_indices=(0,), transform=IdentityTransform()),
+            ),
+            "must be globally unique",
+            id="duplicate-target-axis",
+        ),
+        pytest.param(
+            (
+                _ByDimensionChild(source_indices=(0,), target_indices=(0,), transform=IdentityTransform()),
+                _ByDimensionChild(source_indices=(1,), target_indices=(2,), transform=IdentityTransform()),
+            ),
+            "must include all zero-based indices",
+            id="non-contiguous-target-axes",
+        ),
+    ],
+)
+def test_by_dimension_rejects_duplicate_or_non_consecutive_target_indices(children, expected_error):
+    with pytest.raises(ValueError, match=str(expected_error)):
+        _ = ByDimensionTransform(transforms=children)
+
+
+@pytest.mark.parametrize(
+    ("source_indices", "target_indices", "transform"),
+    [
+        pytest.param((0, 0), (0, 1), IdentityTransform(), id="duplicate sources"),
+        pytest.param((0, 1), (0, 0), IdentityTransform(), id="duplicate targets"),
+        pytest.param((0,), (0,), ScaleTransform((1.0, 2.0)), id="source ndim too small"),
+        pytest.param((0, 1, 2), (0, 1), ScaleTransform((1.0, 2.0)), id="source ndim too large"),
+        pytest.param((0, 1), (0,), ScaleTransform((1.0, 2.0)), id="target ndim too small"),
+        pytest.param((0, 1), (0, 1, 2), ScaleTransform((1.0, 2.0)), id="target ndim too large"),
+    ],
+)
+def test_by_dimension_item_rejects_axes_mismatching_child(source_indices, target_indices, transform):
+    # TODO: Here we would in particular want to test ProjectAxisTransform because its ndim delta needs unique
+    #  validation - but that validation doesn't exist yet.
+    with pytest.raises(ValueError):
+        _ByDimensionChild(
+            source_indices=source_indices,
+            target_indices=target_indices,
+            transform=cast(Transform, transform),
+        )
+
+
+def test_by_dimension_accepts_excess_axes_on_bound_source():
+    """Dropping axes is canonically done through ProjectAxisTransform,
+    but simply ignoring source axes in ByDimension is also valid.
+    The only requirement is that all *target* axes must be produced by a child."""
+    source = _sys_ref("source", "zyx")
+    target = _sys_ref("target", "yx")
+
+    item = _ByDimensionChild(source_indices=(1, 2), target_indices=(0, 1), transform=IdentityTransform())
+    _ = ByDimensionTransform(transforms=(item,), source=source, target=target)
+
+
+def test_by_dimension_rejects_sourcing_more_axes_than_bound():
+    bad_source = _sys_ref("source", "x")
+    target = _sys_ref("target", "yx")
+    item = _ByDimensionChild(source_indices=(1, 2), target_indices=(0, 1), transform=ScaleTransform(scale=(1, 1)))
+
+    with pytest.raises(ValueError, match="input axis outside source axes"):
+        ByDimensionTransform(transforms=(item,), source=bad_source, target=target)
+
+
+def test_by_dimension_rejects_targeting_fewer_axes_than_bound():
+    source = _sys_ref("source", "zyx")
+    bad_target = _sys_ref("target", "zyx")
+    item = _ByDimensionChild(source_indices=(1, 2), target_indices=(0, 1), transform=ScaleTransform(scale=(1, 1)))
+
+    with pytest.raises(ValueError, match="must cover target axes"):
+        ByDimensionTransform(transforms=(item,), source=source, target=bad_target)
+
+
+def test_by_dimension_inverted_swaps_item_axes_and_inverts_nested_transforms():
+    transform = ByDimensionTransform(
+        transforms=(
+            _ByDimensionChild(source_indices=(0, 1), target_indices=(0, 1), transform=ScaleTransform((2.0, 3.0))),
+            _ByDimensionChild(source_indices=(2,), target_indices=(2,), transform=TranslationTransform((5.0,))),
+            _ByDimensionChild(source_indices=(3, 4), target_indices=(4, 3), transform=IdentityTransform()),
+        ),
+    )
+
+    assert transform.inverted() == ByDimensionTransform(
+        transforms=(
+            _ByDimensionChild(source_indices=(0, 1), target_indices=(0, 1), transform=ScaleTransform((0.5, 1 / 3))),
+            _ByDimensionChild(source_indices=(2,), target_indices=(2,), transform=TranslationTransform((-5.0,))),
+            _ByDimensionChild(source_indices=(4, 3), target_indices=(3, 4), transform=IdentityTransform()),
+        ),
+    )
+
+
+def test_by_dimension_inverted_rejects_non_invertible_transform():
+    transform = ByDimensionTransform(
+        transforms=(
+            _ByDimensionChild(
+                source_indices=(0, 1),
+                target_indices=(0,),
+                transform=ProjectAxisTransform(drops=(0,), inserts=()),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="not invertible"):
+        transform.inverted()
+
+
+def test_by_dimension_double_inversion_returns_original_transform():
+    transform = ByDimensionTransform(
+        transforms=(
+            _ByDimensionChild(source_indices=(0, 1), target_indices=(0, 1), transform=ScaleTransform((2.0, 3.0))),
+            _ByDimensionChild(source_indices=(2,), target_indices=(2,), transform=TranslationTransform((5.0,))),
+        ),
+    )
+
+    assert transform.inverted().inverted() == transform
+
+
+def test_by_dimension_composes_itemwise_when_matching():
+    earlier = ByDimensionTransform(
+        transforms=(
+            _ByDimensionChild(source_indices=(0,), target_indices=(0,), transform=IdentityTransform()),
+            _ByDimensionChild(source_indices=(1,), target_indices=(1,), transform=ScaleTransform((2.0,))),
+            _ByDimensionChild(source_indices=(2,), target_indices=(2,), transform=TranslationTransform((2.0,))),
+            _ByDimensionChild(
+                source_indices=(3,), target_indices=(3, 4), transform=ProjectAxisTransform(drops=(), inserts=(1,))
+            ),
+        ),
+    )
+
+    later = ByDimensionTransform(
+        transforms=(  # order of the children shouldn't matter; earlier's targets and later's sources match
+            _ByDimensionChild(source_indices=(2,), target_indices=(2,), transform=TranslationTransform((3.0,))),
+            _ByDimensionChild(source_indices=(0,), target_indices=(0,), transform=IdentityTransform()),
+            _ByDimensionChild(
+                source_indices=(3, 4), target_indices=(3,), transform=ProjectAxisTransform(drops=(1,), inserts=())
+            ),
+            _ByDimensionChild(source_indices=(1,), target_indices=(1,), transform=ScaleTransform((3.0,))),
+        ),
+    )
+
+    expected = ByDimensionTransform(
+        transforms=(
+            _ByDimensionChild(source_indices=(2,), target_indices=(2,), transform=TranslationTransform((5.0,))),
+            _ByDimensionChild(source_indices=(0,), target_indices=(0,), transform=IdentityTransform()),
+            _ByDimensionChild(
+                source_indices=(3,), target_indices=(3,), transform=ProjectAxisTransform(drops=(), inserts=())
+            ),
+            _ByDimensionChild(source_indices=(1,), target_indices=(1,), transform=ScaleTransform((6.0,))),
+        ),
+    )
+
+    assert later.composed_with(earlier) == expected
+
+
+@pytest.mark.parametrize(
+    "earlier",
+    [
+        pytest.param(
+            ByDimensionTransform(
+                transforms=(_ByDimensionChild((0,), (0,), ScaleTransform((2.0,))),),
+            ),
+            id="missing matching item",
+        ),
+        pytest.param(
+            ByDimensionTransform(
+                transforms=(
+                    _ByDimensionChild((0,), (0,), IdentityTransform()),
+                    _ByDimensionChild((1,), (1,), IdentityTransform()),
+                    _ByDimensionChild((2,), (2,), IdentityTransform()),
+                ),
+            ),
+            id="unused earlier item",
+        ),
+        pytest.param(
+            ByDimensionTransform(
+                transforms=(
+                    _ByDimensionChild((0,), (0,), ProjectAxisTransform(drops=(0,), inserts=(0,))),
+                    _ByDimensionChild((1,), (1,), IdentityTransform()),
+                ),
+            ),
+            id="project axis does not compose with scale",
+        ),
+    ],
+)
+def test_by_dimension_fails_invalid_itemwise_composition(earlier):
+    later = ByDimensionTransform(
+        transforms=(
+            _ByDimensionChild((0,), (0,), ScaleTransform((2.0,))),
+            _ByDimensionChild((1,), (1,), IdentityTransform()),
+        ),
+    )
+
+    assert later.composed_with(cast(ByDimensionTransform, earlier)) is None
+
+
+def test_by_dimension_fails_composition_of_project_target_into_non_identity():
+    earlier = ProjectAxisTransform(drops=(), inserts=(1,))
+    later = ByDimensionTransform(
+        transforms=(
+            _ByDimensionChild(
+                source_indices=(0, 1),  # sources an axis inserted by projectAxis
+                target_indices=(0, 1),
+                transform=ScaleTransform((2.0, 3.0)),
+            ),
+        ),
+    )
+    # The equivalent composition would be as below. This isn't necessarily better or simpler, so instead we refuse.
+    # composed = ByDimensionTransform(
+    #     transforms=(
+    #         _ByDimensionChild(
+    #             source_indices=(0,),
+    #             target_indices=(0, 1),
+    #             transform=TransformSequence(
+    #                 (
+    #                     ProjectAxisTransform(drops=(), inserts=(1,)),
+    #                     ScaleTransform((2.0, 3.0)),
+    #                 )
+    #             ),
+    #         ),
+    #     ),
+    # )
+    assert later.composed_with(earlier) is None
+
+
+@pytest.mark.parametrize(
+    ("earlier", "later", "expected"),
+    [
+        pytest.param(
+            ProjectAxisTransform(drops=(0,), inserts=()),
+            ByDimensionTransform((_ByDimensionChild((0, 1), (0, 1), ScaleTransform((2, 3))),)),
+            ByDimensionTransform((_ByDimensionChild((1, 2), (0, 1), ScaleTransform((2, 3))),)),
+            id="drop leading axis increments all source indices",
+        ),
+        pytest.param(
+            ProjectAxisTransform(drops=(1,), inserts=()),
+            ByDimensionTransform((_ByDimensionChild((0, 1), (0, 1), ScaleTransform((2, 3))),)),
+            ByDimensionTransform((_ByDimensionChild((0, 2), (0, 1), ScaleTransform((2, 3))),)),
+            id="drop middle axis increments only subsequent source indices",
+        ),
+        pytest.param(
+            ProjectAxisTransform(drops=(1, 3), inserts=()),
+            ByDimensionTransform((_ByDimensionChild((0, 1, 2), (0, 1, 2), ScaleTransform((2, 3, 4))),)),
+            ByDimensionTransform((_ByDimensionChild((0, 2, 4), (0, 1, 2), ScaleTransform((2, 3, 4))),)),
+            id="multiple drops increment source indices cumulatively",
+        ),
+        pytest.param(
+            # Composing this insert before byDim with only (0, 1) targets implies dropping the just-inserted axis
+            ProjectAxisTransform(drops=(), inserts=(0,)),
+            ByDimensionTransform((_ByDimensionChild((1, 2), (0, 1), ScaleTransform((2, 3))),)),
+            ByDimensionTransform((_ByDimensionChild((0, 1), (0, 1), ScaleTransform((2, 3))),)),
+            id="insert leading axis decrements all source indices",
+        ),
+        pytest.param(
+            ProjectAxisTransform(drops=(), inserts=(1,)),
+            ByDimensionTransform((_ByDimensionChild((0, 2), (0, 1), ScaleTransform((2, 3))),)),
+            ByDimensionTransform((_ByDimensionChild((0, 1), (0, 1), ScaleTransform((2, 3))),)),
+            id="insert middle axis decrements only subsequent source indices",
+        ),
+        pytest.param(
+            ProjectAxisTransform(drops=(), inserts=(1, 3)),
+            ByDimensionTransform((_ByDimensionChild((0, 2, 4), (0, 1, 2), ScaleTransform((2, 3, 4))),)),
+            ByDimensionTransform((_ByDimensionChild((0, 1, 2), (0, 1, 2), ScaleTransform((2, 3, 4))),)),
+            id="multiple inserts decrement source indices cumulatively",
+        ),
+        pytest.param(
+            ProjectAxisTransform(drops=(), inserts=(1, 3, 5)),
+            ByDimensionTransform(
+                (
+                    _ByDimensionChild((0, 2, 4), (0, 1, 3), ScaleTransform((2, 3, 4))),
+                    _ByDimensionChild((1, 5), (2, 4), IdentityTransform()),
+                )
+            ),
+            ByDimensionTransform(
+                (
+                    _ByDimensionChild((0, 1, 2), (0, 1, 3), ScaleTransform((2, 3, 4))),
+                    _ByDimensionChild((), (2, 4), ProjectAxisTransform(inserts=(0, 1))),
+                )
+            ),
+            id="inserts sourced by later identity remain inserts in composition",
+        ),
+    ],
+)
+def test_by_dimension_composes_after_project_axis(earlier, later, expected):
+    later = cast(ByDimensionTransform, later)
+    earlier = cast(ByDimensionTransform, earlier)
+    assert later.composed_with(earlier) == expected
 
 
 def test_transform_sequence_rejects_mismatched_axis_value_counts():

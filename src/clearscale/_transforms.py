@@ -490,6 +490,8 @@ class Transform(ABC):
             )
         elif t_type == "bijection":
             return BijectionTransform.from_ome_zarr(ome_dict)
+        elif t_type == "byDimension":
+            return ByDimensionTransform.from_ome_zarr(ome_dict)
         else:
             raise ValueError(f"Unknown transform type: {t_type!r}")
 
@@ -1211,6 +1213,277 @@ class BijectionTransform(Transform):
                     "BijectionTransform forward and inverse dimensionality disagree: "
                     f"forward={forward_ndim!r}, inverse={inverse_ndim!r}"
                 )
+
+
+@dataclass(frozen=True, slots=True)
+class _ByDimensionChild:
+    source_indices: Tuple[int, ...]
+    target_indices: Tuple[int, ...]
+    transform: Transform
+
+    @classmethod
+    def from_ome_zarr(cls, item_dict: Mapping[str, Any]) -> "_ByDimensionChild":
+        if not isinstance(item_dict, MappingABC):
+            raise ValueError(f"Invalid byDimension transform item metadata. Received: {item_dict!r}")
+        transformation_dict = item_dict.get("transformation")
+        if not isinstance(transformation_dict, MappingABC):
+            raise ValueError(f"Invalid byDimension transform item metadata. Received: {item_dict!r}")
+        return cls(
+            source_indices=_require_int_or_empty_tuple(
+                item_dict.get("inputAxes", ()), "inputAxes", transform_type="byDimension"
+            ),
+            target_indices=_require_int_or_empty_tuple(
+                item_dict.get("outputAxes", ()), "outputAxes", transform_type="byDimension"
+            ),
+            transform=Transform.from_ome_zarr(transformation_dict),
+        )
+
+    def to_ome_zarr(self, version: str) -> Dict[str, Any]:
+        return {
+            "inputAxes": list(self.source_indices),
+            "outputAxes": list(self.target_indices),
+            "transformation": self.transform.to_ome_zarr(version),
+        }
+
+    def __post_init__(self):
+        source_indices = _require_int_or_empty_tuple(
+            self.source_indices, "source_indices", transform_type="ByDimensionTransform.child"
+        )
+        target_indices = _require_int_or_empty_tuple(
+            self.target_indices, "target_indices", transform_type="ByDimensionTransform.child"
+        )
+        _validate_unique(source_indices, "ByDimensionTransform.child.source_indices")
+        _validate_unique(target_indices, "ByDimensionTransform.child.target_indices")
+        if not isinstance(self.transform, Transform):
+            raise ValueError(f"ByDimensionChild must contain a Transform instance, not {self.transform!r}.")
+        ndim = self.transform._ndim_by_payload()
+        if ndim is not None:
+            source_ndim, target_ndim = ndim
+            if len(source_indices) != source_ndim:
+                raise ValueError(
+                    f"ByDimensionTransform.child.source_indices must contain {source_ndim} entries for "
+                    f"{type(self.transform).__name__}. Received: {source_indices!r}"
+                )
+            if len(target_indices) != target_ndim:
+                raise ValueError(
+                    f"ByDimensionTransform.child.target_indices must contain {target_ndim} entries for "
+                    f"{type(self.transform).__name__}. Received: {target_indices!r}"
+                )
+        object.__setattr__(self, "source_indices", source_indices)
+        object.__setattr__(self, "target_indices", target_indices)
+
+
+@dataclass(frozen=True, slots=True)
+class ByDimensionTransform(Transform):
+    transforms: Tuple[_ByDimensionChild, ...]
+
+    @property
+    def is_invertible(self) -> bool:
+        source_indices = tuple(axis for child in self.transforms for axis in child.source_indices)
+        target_indices = tuple(axis for child in self.transforms for axis in child.target_indices)
+        return (
+            all(item.transform.is_invertible for item in self.transforms)
+            and len(set(source_indices)) == len(source_indices)
+            and _covers_all_indices(source_indices)
+            and _covers_all_indices(target_indices)
+        )
+
+    def inverted(self) -> "ByDimensionTransform":
+        if not self.is_invertible:
+            raise ValueError("ByDimensionTransform is not invertible.")
+        return replace(
+            self,
+            transforms=tuple(
+                _ByDimensionChild(
+                    source_indices=item.target_indices,
+                    target_indices=item.source_indices,
+                    transform=item.transform.inverted(),
+                )
+                for item in self.transforms
+            ),
+            source=self.target,
+            target=self.source,
+        )
+
+    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
+        """
+        Only composes with ByDimensionTransform and ProjectAxisTransform.
+        Could permit MapAxisTransform: As long as mapAxis only modifies sets of axes that are sourced by the
+        same byDim child. Decided to reject this, because spec text doesn't read like reordering was intended for byDim.
+        """
+        if not self._endpoints_can_chain_after(earlier):
+            return None
+        if isinstance(earlier, ByDimensionTransform):
+            earlier_by_outputs = {item.target_indices: item for item in earlier.transforms}
+
+            new_items = []
+            matched = set()
+
+            for item in self.transforms:
+                earlier_item = earlier_by_outputs.get(item.source_indices)
+                if earlier_item is None:
+                    return None
+                matched.add(item.source_indices)
+
+                composed = item.transform.composed_with(earlier_item.transform)
+                if composed is None:
+                    return None
+
+                new_items.append(
+                    _ByDimensionChild(
+                        source_indices=earlier_item.source_indices,
+                        target_indices=item.target_indices,
+                        transform=composed,
+                    )
+                )
+
+            if len(matched) != len(earlier.transforms):  # some of earlier's items had no match
+                return None
+
+            return replace(
+                self,
+                transforms=tuple(new_items),
+                source=self._composed_source(earlier),
+                target=self._composed_target(earlier),
+            )
+
+        if isinstance(earlier, ProjectAxisTransform):
+            # Every drop increments bydimension items' source indices that were higher than the dropped index
+            #  ex: Earlier "CYX --(drop 0)-> YX" + Later byDim "[0,1 --Scale-> 0,1]"
+            #            = "CYX --> [1,2 --Scale-> 0,1] --> YX"
+            # Every insert conversely decrements. This only works if all inserts are only used by identity.
+            #  ex: Earlier "YX --(add 0)-> CYX" + Later byDim "[1,2 --Scale-> 1,2]+[0 --Ident-> 0]"
+            #            = "YX --> [0,1 --Scale-> 1,2]+[_ --ProjectAxis-> 0] --> CYX"
+            #  Note we still end up with ProjectAxis, but now it's inside the byDim and the identity is gone.
+            items = []
+            earlier_inserts_with_later_identity = []
+
+            def remap_source(axis: int, dropped: Tuple[int, ...], inserted: Tuple[int, ...]) -> int:
+                """Map an earlier.target axis back to the corresponding earlier.source axis.
+                Every axis dropped increments eq/subsequent indices by 1, every insert decrements"""
+                for d in dropped:
+                    if d <= axis:
+                        axis += 1
+                for i in reversed(inserted):
+                    if i < axis:
+                        axis -= 1
+                return axis
+
+            for item in self.transforms:
+                inserted_sources = tuple(axis for axis in item.source_indices if axis in earlier.inserts)
+                if inserted_sources and isinstance(item.transform, IdentityTransform):
+                    # Targets of self's identity children need to be collected into a new ProjectAxis child.
+                    # Can't just keep inserted_sources though - the Identity might have remapped indices from src->tgt.
+                    earlier_inserts_with_later_identity.extend(
+                        tgt for src, tgt in zip(item.source_indices, item.target_indices) if src in earlier.inserts
+                    )
+                elif inserted_sources:
+                    # The only way we could faithfully reproduce a non-identity that operates on an inserted axis
+                    # is by nesting a sequence of [projectAxis, item.transform] inside this byDim item.
+                    # That isn't necessarily better than the sequence of [projectAxis, byDim]
+                    # that we're trying to collapse, so break off here.
+                    return None
+
+                unaffected_src_tgt_pairs = tuple(
+                    (src, tgt)
+                    for src, tgt in zip(item.source_indices, item.target_indices)
+                    if src not in earlier.inserts
+                )
+                if unaffected_src_tgt_pairs:
+                    kept_src, kept_tgt = zip(*unaffected_src_tgt_pairs)
+                    items.append(
+                        replace(
+                            item,
+                            source_indices=tuple(remap_source(ax, earlier.drops, earlier.inserts) for ax in kept_src),
+                            target_indices=tuple(kept_tgt),
+                        )
+                    )
+
+            if earlier_inserts_with_later_identity:
+                items.append(
+                    _ByDimensionChild(
+                        source_indices=(),
+                        target_indices=tuple(earlier_inserts_with_later_identity),
+                        transform=ProjectAxisTransform(
+                            drops=(),
+                            inserts=tuple(range(len(earlier_inserts_with_later_identity))),
+                        ),
+                    )
+                )
+
+            return replace(
+                self,
+                transforms=tuple(items),
+                source=self._composed_source(earlier),
+                target=self._composed_target(earlier),
+            )
+
+        return None
+
+    def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
+        return {
+            "type": "byDimension",
+            "transformations": [item.to_ome_zarr(version) for item in self.transforms],
+        }
+
+    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+        # TODO: This transform type knows its output ndim, but it can't know the exact source ndim.
+        #  E.g. having two children with source_indices (0,) and (0,) is valid. This means the source must have
+        #  *at least* one axis. It might have more, but the others don't flow into a target, i.e. are dropped.
+        return None
+
+    @staticmethod
+    def _source_ndim_always_eq_target_ndim() -> bool:
+        return False
+
+    @classmethod
+    def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "ByDimensionTransform":
+        source, target = cls._parse_source_and_target(ome_dict)
+        raw_transformations = ome_dict.get("transformations")
+        if not isinstance(raw_transformations, list) or not raw_transformations:
+            raise ValueError(f"Invalid byDimension transform metadata. Received: {ome_dict!r}")
+        return cls(
+            transforms=tuple(_ByDimensionChild.from_ome_zarr(item) for item in raw_transformations),
+            _ome_zarr_name=cls._parse_name(ome_dict),
+            source=source,
+            target=target,
+        )
+
+    def __post_init__(self):
+        children = tuple(self.transforms)
+        if not children:
+            raise ValueError("ByDimensionTransform requires at least one child transformation.")
+        if any(not isinstance(c, _ByDimensionChild) for c in children):
+            raise ValueError("ByDimensionTransform must only contain ByDimensionChild instances.")
+        output_axes = tuple(axis for item in children for axis in item.target_indices)
+        if len(set(output_axes)) != len(output_axes):
+            raise ValueError(f"ByDimensionTransform target axes must be globally unique. Received: {output_axes!r}")
+        if not _covers_all_indices(output_axes):
+            raise ValueError(
+                f"ByDimensionTransform target axes must include all zero-based indices. Received: {output_axes!r}"
+            )
+        object.__setattr__(self, "transforms", children)
+        Transform.__post_init__(self)
+
+    def _validate_bound_axes(self) -> None:
+        source_axes = tuple(self.source.owner.axes()) if isinstance(self.source, NodeRef) else None
+        target_axes = tuple(self.target.owner.axes()) if isinstance(self.target, NodeRef) else None
+
+        if source_axes is not None:
+            source_ndim = len(source_axes)
+            for item in self.transforms:
+                if any(axis >= source_ndim for axis in item.source_indices):
+                    raise ValueError(
+                        f"ByDimensionTransform input axis outside source axes {list(source_axes)}: "
+                        f"{item.source_indices!r}"
+                    )
+
+        output_axes = tuple(axis for item in self.transforms for axis in item.target_indices)
+        if target_axes is not None and set(output_axes) != set(range(len(target_axes))):
+            raise ValueError(
+                f"ByDimensionTransform output axes must cover target axes {list(target_axes)}. "
+                f"Received: {output_axes!r}"
+            )
 
 
 def _ordered_unique_refs(refs: Iterable[_RefT]) -> Tuple[_RefT, ...]:
