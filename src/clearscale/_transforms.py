@@ -30,6 +30,19 @@ from clearscale._axis_values import (
     Translation,
     Unit,
 )
+from clearscale._services.matrices import (
+    FloatMatrix,
+    is_identity_matrix,
+    is_diagonal_matrix,
+    is_rotation_matrix,
+    matrix_shape,
+    matrix_multiply,
+    matrix_vector_multiply,
+    matrix_transpose,
+    matrix_invert,
+    matrix_determinant,
+    DETERMINANT_SINGULARITY_TOLERANCE,
+)
 
 RelativePath = str  # 0.6.dev4: scene["coordinateTransformations"][]["input"]["path"]
 CoordinateSystemName = str  # str from ["input"]["name"]
@@ -40,6 +53,7 @@ _TransformSequenceSelf = TypeVar("_TransformSequenceSelf", bound="TransformSeque
 _RefT = TypeVar("_RefT")
 
 PRE_TRANSFORMS_VERSIONS = ("0.1", "0.2", "0.3", "0.4", "0.5")
+IDENTITY_TOLERANCE = 1e-13
 
 
 class CoordinateContinuity(str, enum.Enum):
@@ -159,20 +173,42 @@ ResolvedRef = NodeRef[TransformGraphNode]
 AnyRef = Union[ResolvedRef, _UnresolvedRef]
 
 
-def _require_numbers_unless_path(ome_dict: Mapping[str, Any], field_name: str) -> Tuple[float, ...]:
-    """Raises if no numbers, unless 'path' field is set"""
-    raw: Any = ome_dict.get(field_name, ())
+def _is_number(value: Any) -> TypeGuard[numbers.Real]:
+    return isinstance(value, numbers.Real) and not isinstance(value, bool)
+
+
+def _require_numbers(value: Any, field_name: str) -> Tuple[float, ...]:
     try:
-        values = tuple(raw)
+        values = tuple(value)
     except TypeError:
         values = ()
     if not values:
-        if isinstance(ome_dict.get("path"), str) and ome_dict["path"]:
-            return ()
-        raise ValueError(f"Invalid {field_name} transform metadata. Expected sequence of numbers, received: {raw!r}")
-    if not all(isinstance(v, numbers.Real) and not isinstance(v, bool) for v in values):
-        raise ValueError(f"Invalid {field_name} transform metadata. Expected sequence of numbers, received: {raw!r}")
+        raise ValueError(f"Invalid {field_name}. Expected sequence, received: {value!r}")
+    if not all(_is_number(v) for v in values):
+        raise ValueError(f"Invalid {field_name}. Expected sequence of numbers, received: {value!r}")
     return tuple(float(v) for v in values)
+
+
+def _require_rectangular_matrix(value: Any, field_name: str) -> FloatMatrix:
+    try:
+        rows = tuple(tuple(row) for row in value)
+    except TypeError:
+        rows = ()
+    if not rows:
+        raise ValueError(f"Invalid matrix. Expected 2D array in {field_name!r}, received: {value!r}")
+    row_length = len(rows[0])
+    if row_length == 0 or any(len(row) != row_length for row in rows):
+        raise ValueError(f"Invalid matrix. Expected rectangular 2D array in {field_name!r}, received: {value!r}")
+    if not all(_is_number(v) for row in rows for v in row):
+        raise ValueError(f"Invalid number matrix. Expected 2D numeric array in {field_name!r}, received: {value!r}")
+    return tuple(tuple(float(v) for v in row) for row in rows)
+
+
+def _require_path(ome_dict: Mapping[str, Any], *, transform_type: str) -> str:
+    path = ome_dict.get("path")
+    if not isinstance(path, str) or not path:
+        raise ValueError(f"Invalid {transform_type} transform metadata. Expected non-empty path, received: {path!r}")
+    return path
 
 
 def _require_int_or_empty_tuple(value: Any, field_name: str, *, transform_type: str) -> Tuple[int, ...]:
@@ -476,6 +512,10 @@ class Transform(ABC):
             return ScaleTransform.from_ome_zarr(ome_dict)
         elif t_type == "translation":
             return TranslationTransform.from_ome_zarr(ome_dict)
+        elif t_type == "rotation":
+            return RotationTransform.from_ome_zarr(ome_dict)
+        elif t_type == "affine":
+            return AffineTransform.from_ome_zarr(ome_dict)
         elif t_type == "mapAxis":
             return MapAxisTransform.from_ome_zarr(ome_dict)
         elif t_type == "projectAxis":
@@ -623,9 +663,12 @@ class ScaleTransform(Transform):
             return None
         if not self._endpoints_can_chain_after(earlier):
             return None
+        product_scale = tuple(a * b for a, b in zip(self.scale, earlier.scale))
+        if all(abs(p - 1) <= IDENTITY_TOLERANCE for p in product_scale):
+            return IdentityTransform(source=self._composed_source(earlier), target=self._composed_target(earlier))
         return replace(
             self,
-            scale=tuple(a * b for a, b in zip(self.scale, earlier.scale)),
+            scale=product_scale,
             source=self._composed_source(earlier),
             target=self._composed_target(earlier),
             _ome_zarr_path=None,
@@ -646,11 +689,17 @@ class ScaleTransform(Transform):
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "ScaleTransform":
-        scale = _require_numbers_unless_path(ome_dict, "scale")
         source, target = cls._parse_source_and_target(ome_dict)
+        if "scale" in ome_dict:
+            return cls(
+                scale=_require_numbers(ome_dict["scale"], "scale"),
+                _ome_zarr_name=cls._parse_name(ome_dict),
+                source=source,
+                target=target,
+            )
         return cls(
-            scale=scale,
-            _ome_zarr_path=ome_dict.get("path"),
+            scale=(),
+            _ome_zarr_path=_require_path(ome_dict, transform_type="scale"),
             _ome_zarr_name=cls._parse_name(ome_dict),
             source=source,
             target=target,
@@ -693,9 +742,12 @@ class TranslationTransform(Transform):
             return None
         if not self._endpoints_can_chain_after(earlier):
             return None
+        sum_translation = tuple(a + b for a, b in zip(self.translation, earlier.translation))
+        if all(s <= IDENTITY_TOLERANCE for s in sum_translation):
+            return IdentityTransform(source=self._composed_source(earlier), target=self._composed_target(earlier))
         return replace(
             self,
-            translation=tuple(a + b for a, b in zip(self.translation, earlier.translation)),
+            translation=sum_translation,
             source=self._composed_source(earlier),
             target=self._composed_target(earlier),
             _ome_zarr_path=None,
@@ -716,11 +768,17 @@ class TranslationTransform(Transform):
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "TranslationTransform":
-        translation = _require_numbers_unless_path(ome_dict, "translation")
         source, target = cls._parse_source_and_target(ome_dict)
+        if "translation" in ome_dict:
+            return cls(
+                translation=_require_numbers(ome_dict["translation"], "translation"),
+                _ome_zarr_name=cls._parse_name(ome_dict),
+                source=source,
+                target=target,
+            )
         return cls(
-            translation=translation,
-            _ome_zarr_path=ome_dict.get("path"),
+            translation=(),
+            _ome_zarr_path=_require_path(ome_dict, transform_type="translation"),
             _ome_zarr_name=cls._parse_name(ome_dict),
             source=source,
             target=target,
@@ -736,6 +794,223 @@ class TranslationTransform(Transform):
                 f"received {len(axes)}: {list(axes)}"
             )
         return Translation(zip(axes, self.translation))
+
+
+@dataclass(frozen=True, slots=True)
+class RotationTransform(Transform):
+    rotation: Optional[FloatMatrix] = None
+    _ome_zarr_path: Optional[str] = None
+
+    @property
+    def is_invertible(self) -> bool:
+        return self.rotation is not None
+
+    def inverted(self) -> "RotationTransform":
+        if self.rotation is None:
+            raise ValueError("Path-backed RotationTransform cannot be inverted.")
+        return replace(
+            self,
+            rotation=matrix_transpose(self.rotation),
+            _ome_zarr_path=None,
+            source=self.target,
+            target=self.source,
+        )
+
+    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
+        if not isinstance(earlier, RotationTransform):
+            return None
+        if self.rotation is None or earlier.rotation is None:
+            return None
+        if not self._endpoints_can_chain_after(earlier):
+            return None
+        composed_rotation = matrix_multiply(self.rotation, earlier.rotation)
+        if is_identity_matrix(composed_rotation, tolerance=IDENTITY_TOLERANCE):
+            return IdentityTransform(source=self._composed_source(earlier), target=self._composed_target(earlier))
+        return replace(
+            self,
+            rotation=composed_rotation,
+            _ome_zarr_path=None,
+            source=self._composed_source(earlier),
+            target=self._composed_target(earlier),
+        )
+
+    def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
+        if self._ome_zarr_path is not None:
+            return {"type": "rotation", "path": self._ome_zarr_path}
+        assert self.rotation is not None
+        return {"type": "rotation", "rotation": [list(row) for row in self.rotation]}
+
+    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+        if self.rotation is None:
+            return None
+        rows, cols = matrix_shape(self.rotation)
+        return cols, rows
+
+    @classmethod
+    def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "RotationTransform":
+        source, target = cls._parse_source_and_target(ome_dict)
+        if "rotation" in ome_dict:
+            return cls(
+                rotation=_require_rectangular_matrix(ome_dict["rotation"], "rotation"),
+                _ome_zarr_name=cls._parse_name(ome_dict),
+                source=source,
+                target=target,
+            )
+        return cls(
+            _ome_zarr_path=_require_path(ome_dict, transform_type="rotation"),
+            _ome_zarr_name=cls._parse_name(ome_dict),
+            source=source,
+            target=target,
+        )
+
+    def __post_init__(self):
+        if self.rotation is None and self._ome_zarr_path is None:
+            raise ValueError("RotationTransform requires either rotation values or path.")
+        if self.rotation is not None and self._ome_zarr_path is not None:
+            raise ValueError("RotationTransform cannot have both rotation values and path.")
+        if self.rotation is not None:
+            rotation = _require_rectangular_matrix(self.rotation, "rotation")
+            rows, cols = matrix_shape(rotation)
+            if rows != cols:
+                raise ValueError(f"RotationTransform matrix must be square. Received shape: {(rows, cols)}")
+            if not is_rotation_matrix(rotation):
+                raise ValueError(f"RotationTransform matrix must define a rotation. Received: {self.rotation!r}.")
+            object.__setattr__(self, "rotation", rotation)
+        elif not isinstance(self._ome_zarr_path, str) or not self._ome_zarr_path:
+            raise ValueError(f"RotationTransform without values requires path. Received: {self._ome_zarr_path!r}")
+        Transform.__post_init__(self)
+
+
+@dataclass(frozen=True, slots=True)
+class AffineTransform(Transform):
+    affine: Optional[FloatMatrix] = None
+    _ome_zarr_path: Optional[str] = None
+
+    @property
+    def is_invertible(self) -> bool:
+        if self.affine is None:
+            return False
+        source_ndim, target_ndim = self._ndim_by_payload() or (None, None)
+        if source_ndim != target_ndim:
+            return False
+        return abs(matrix_determinant(self._linear())) > DETERMINANT_SINGULARITY_TOLERANCE
+
+    def inverted(self) -> "AffineTransform":
+        if not self.is_invertible:
+            raise ValueError("This AffineTransform is not invertible.")
+        inverse_linear = matrix_invert(self._linear())
+        inverse_offset = tuple(-v for v in matrix_vector_multiply(inverse_linear, self._translation()))
+        inverse_affine = tuple(row + (inverse_offset[i],) for i, row in enumerate(inverse_linear))
+        return replace(
+            self,
+            affine=inverse_affine,
+            _ome_zarr_path=None,
+            source=self.target,
+            target=self.source,
+        )
+
+    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
+        if not isinstance(earlier, AffineTransform):
+            return None
+        self_ndim = self._ndim_by_payload()
+        earlier_ndim = earlier._ndim_by_payload()
+        if self_ndim is None or earlier_ndim is None or self_ndim[0] != earlier_ndim[0]:
+            return None
+        if not self._endpoints_can_chain_after(earlier):
+            return None
+        new_linear = matrix_multiply(self._linear(), earlier._linear())
+        new_t = tuple(
+            a + b for a, b in zip(matrix_vector_multiply(self._linear(), earlier._translation()), self._translation())
+        )
+        is_linear_identity = is_identity_matrix(new_linear, tolerance=IDENTITY_TOLERANCE)
+        is_translation_identity = all(abs(t) < IDENTITY_TOLERANCE for t in new_t)
+        if is_linear_identity and is_translation_identity:
+            return IdentityTransform(source=self._composed_source(earlier), target=self._composed_target(earlier))
+        elif is_linear_identity:
+            return TranslationTransform(
+                translation=new_t, source=self._composed_source(earlier), target=self._composed_target(earlier)
+            )
+        elif is_translation_identity:
+            if is_diagonal_matrix(new_linear, tolerance=IDENTITY_TOLERANCE):
+                return ScaleTransform(
+                    scale=tuple(new_linear[i][i] for i in range(len(new_linear))),
+                    source=self._composed_source(earlier),
+                    target=self._composed_target(earlier),
+                )
+            if is_rotation_matrix(new_linear, tolerance=IDENTITY_TOLERANCE):
+                return RotationTransform(
+                    rotation=new_linear,
+                    source=self._composed_source(earlier),
+                    target=self._composed_target(earlier),
+                )
+        affine = tuple(row + (new_t[i],) for i, row in enumerate(new_linear))
+        return replace(
+            self,
+            affine=affine,
+            _ome_zarr_path=None,
+            source=self._composed_source(earlier),
+            target=self._composed_target(earlier),
+        )
+
+    def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
+        if self._ome_zarr_path is not None:
+            return {"type": "affine", "path": self._ome_zarr_path}
+        assert self.affine is not None
+        return {"type": "affine", "affine": [list(row) for row in self.affine]}
+
+    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+        if self.affine is None:
+            return None
+        rows, cols = matrix_shape(self.affine)
+        return cols - 1, rows
+
+    @staticmethod
+    def _source_ndim_always_eq_target_ndim() -> bool:
+        return False
+
+    @classmethod
+    def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "AffineTransform":
+        source, target = cls._parse_source_and_target(ome_dict)
+        if "affine" in ome_dict:
+            return cls(
+                affine=_require_rectangular_matrix(ome_dict["affine"], "affine"),
+                _ome_zarr_name=cls._parse_name(ome_dict),
+                source=source,
+                target=target,
+            )
+        return cls(
+            _ome_zarr_path=_require_path(ome_dict, transform_type="affine"),
+            _ome_zarr_name=cls._parse_name(ome_dict),
+            source=source,
+            target=target,
+        )
+
+    def __post_init__(self):
+        if self.affine is None and self._ome_zarr_path is None:
+            raise ValueError("AffineTransform requires either affine values or a path.")
+        if self.affine is not None and self._ome_zarr_path is not None:
+            raise ValueError("AffineTransform requires exactly one of affine values or a path.")
+        if self.affine is not None:
+            affine = _require_rectangular_matrix(self.affine, "affine")
+            rows, cols = matrix_shape(affine)
+            if cols < 2:
+                raise ValueError("AffineTransform matrix must have at least one input dimension and one offset column.")
+            if cols != rows + 1:
+                raise ValueError(
+                    "AffineTransform matrix must be the upper portion of the homogenous form (excluding last row)."
+                )
+            object.__setattr__(self, "affine", affine)
+        elif not isinstance(self._ome_zarr_path, str) or not self._ome_zarr_path:
+            raise ValueError(f"AffineTransform requires a non-empty path. Received: {self._ome_zarr_path!r}")
+        Transform.__post_init__(self)
+
+    def _linear(self):
+        assert self.affine, "Ensure `self.affine is not None` before calling"
+        return tuple(row[:-1] for row in self.affine)
+
+    def _translation(self):
+        assert self.affine, "Ensure `self.affine is not None` before calling"
+        return tuple(row[-1] for row in self.affine)
 
 
 @dataclass(frozen=True, slots=True)

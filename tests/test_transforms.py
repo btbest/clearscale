@@ -117,6 +117,331 @@ def test_resolving_transform_revalidates_endpoint_axes():
         transform.with_resolved({"tile_0": multiscale})
 
 
+def test_path_backed_rotation_round_trips_and_no_ndim():
+    rotation = Transform.from_ome_zarr({"type": "rotation", "path": "coordinateTransformations/rotation"})
+    assert isinstance(rotation, RotationTransform)
+    assert rotation._ndim_by_payload() is None
+    assert not rotation.is_invertible
+    assert rotation.to_ome_zarr("0.6.dev4") == {
+        "type": "rotation",
+        "path": "coordinateTransformations/rotation",
+    }
+
+
+@pytest.mark.parametrize(
+    "matrix, match",
+    [
+        (
+            (
+                (2, 0),
+                (0, 0.5),
+            ),
+            "must define a rotation",  # every row product must be 1 (unit length vector)
+        ),
+        (
+            (
+                (1, 0, 0),
+                (0, 1, 0),
+            ),
+            "must be square",
+        ),
+        (
+            (
+                (1, 0),
+                (0, -1),
+            ),
+            "must define a rotation",  # This would be a reflection
+        ),
+    ],
+)
+def test_rotation_rejects_invalid_matrix(matrix, match):
+    with pytest.raises(ValueError, match=match):
+        RotationTransform(rotation=matrix)
+
+
+@pytest.mark.parametrize(
+    "rotation, inverse",
+    [
+        (((1, 0), (0, 1)), ((1, 0), (0, 1))),
+        (((0, -1), (1, 0)), ((0, 1), (-1, 0))),
+        (
+            (
+                (1, 0, 0, 0),
+                (0, 0, 0, -1),
+                (0, 0, 1, 0),
+                (0, 1, 0, 0),
+            ),
+            (
+                (1, 0, 0, 0),
+                (0, 0, 0, 1),
+                (0, 0, 1, 0),
+                (0, -1, 0, 0),
+            ),
+        ),
+    ],
+)
+def test_rotation_inverts_matrix(rotation, inverse):
+    transform = RotationTransform(rotation=rotation)
+    assert transform.inverted().rotation == inverse, "did not invert as expected"
+    assert transform.inverted().inverted() == transform, "double inversion is always eq input"
+
+
+@pytest.mark.parametrize(
+    "earlier, later, expected",
+    [
+        pytest.param(
+            ((0, -1), (1, 0)),
+            ((0, -1), (1, 0)),
+            ((-1, 0), (0, -1)),
+            id="+90+90=+180",
+        ),
+        pytest.param(
+            ((0, -1), (1, 0)),
+            ((-1, 0), (0, -1)),  # +180 and -180 are identical
+            ((0, 1), (-1, 0)),  # +270 and -90 are identical
+            id="+90+180=+270",
+        ),
+        pytest.param(
+            ((-1, 0), (0, -1)),
+            ((0, -1), (1, 0)),
+            ((0, 1), (-1, 0)),
+            id="+180+90=+270",
+        ),
+    ],
+)
+def test_rotation_composition(earlier, later, expected):
+    composed = RotationTransform(rotation=later).composed_with(RotationTransform(rotation=earlier))
+
+    assert cast(RotationTransform, composed).rotation == expected
+
+
+@pytest.mark.parametrize(
+    "earlier",
+    [
+        ScaleTransform(scale=(2, 2)),
+        TranslationTransform((1, 2)),
+        AffineTransform(((1, 0, 0), (0, 1, 0))),
+    ],
+)
+def test_rotation_only_composes_with_rotation(earlier):
+    assert RotationTransform(((1, 0), (0, 1))).composed_with(earlier) is None
+
+
+def test_path_backed_affine_round_trips_and_no_ndim():
+    affine = Transform.from_ome_zarr({"type": "affine", "path": "coordinateTransformations/affine"})
+    assert isinstance(affine, AffineTransform)
+    assert affine._ndim_by_payload() is None
+    assert not affine.is_invertible
+    assert affine.to_ome_zarr("0.6.dev4") == {
+        "type": "affine",
+        "path": "coordinateTransformations/affine",
+    }
+
+
+@pytest.mark.parametrize(
+    "matrix",
+    [
+        ((0, 0),),  # 1d
+        ((0, 0, 0), (0, 0, 0)),  # 2d
+        ((0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0)),  # 3d
+        ((0, 0, 0, 0, 0), (0, 0, 0, 0, 0), (0, 0, 0, 0, 0), (0, 0, 0, 0, 0)),  # 4d
+    ],
+)
+def test_affine_instantiates_with_abbreviated_form(matrix):
+    """The bottom row (0,...0, 1) of the homogenous form should not be included"""
+    _ = AffineTransform(affine=matrix)
+
+
+@pytest.mark.parametrize(
+    "matrix, expected_error",
+    [
+        ((0,), "Expected 2D array"),
+        (((0,),), "at least one input dimension and one offset column"),
+        (((0, 0, 0),), "upper portion of the homogenous"),
+        (((0,), (0,)), "at least one input dimension and one offset column"),
+        (((0,), (0, 1)), "Expected rectangular 2D array"),
+        (
+            (
+                (0, 0),
+                (0, 1),
+            ),
+            "upper portion of the homogenous",
+        ),
+        (
+            (
+                (0, 0),
+                (0, 0),
+                (0, 1),
+            ),
+            "upper portion of the homogenous",
+        ),
+        (
+            (
+                (0, 0),
+                (0, 0, 0),
+                (0, 1),
+            ),
+            "Expected rectangular 2D array",
+        ),
+        (
+            (
+                (0, 0, 0),
+                (0, 0, 0),
+                (0, 0, 1),
+            ),
+            "upper portion of the homogenous",
+        ),
+        (
+            (
+                (0, 0, 0),
+                (0, 0, 0),
+                (0, 0, 0),
+                (0, 0, 1),
+            ),
+            "upper portion of the homogenous",
+        ),
+    ],
+)
+def test_affine_rejects_anything_but_ndim_by_ndim_plus1(matrix, expected_error):
+    with pytest.raises(ValueError, match=expected_error):
+        _ = AffineTransform(affine=matrix)
+
+
+def test_affine_transform_inverted():
+    transform = AffineTransform(affine=((2, 0, 3), (0, 4, 8)))
+    assert transform.inverted().affine == ((0.5, 0.0, -1.5), (0.0, 0.25, -2.0))
+    assert transform.inverted().inverted() == transform, "double inversion is always eq input"
+
+
+@pytest.mark.parametrize(
+    "matrix",
+    [
+        (
+            (1, 0, 0),
+            (0, 0, 0),
+        ),
+        (
+            (1, 2, 0),
+            (2, 4, 0),
+        ),
+    ],
+)
+def test_affine_noninvertible(matrix):
+    transform = AffineTransform(affine=matrix)
+    assert not transform.is_invertible
+
+    with pytest.raises(ValueError, match="not invertible"):
+        transform.inverted()
+
+
+@pytest.mark.parametrize(
+    "earlier,later,expected",
+    [
+        pytest.param(
+            ((2, 0, 0), (0, 3, 0)),
+            ((4, 0, 0), (0, 5, 0)),
+            ScaleTransform((8, 15)),
+            id="scale only",
+        ),
+        pytest.param(
+            ((0.25, 0, 7), (0, 1, 3)),
+            ((4, 0, 2.2), (0, 1, 5)),
+            TranslationTransform((30.2, 8.0)),  # (4*7 + 2.2, 1*3 + 5)
+            id="scale composes to identity",
+        ),
+        pytest.param(
+            ((1, 0, 7), (0, 2, 3)),
+            ((4, 0, -28), (0, 1, -3)),  # (4*7 - 28 = 0, 1*3 - 3 = 0)
+            ScaleTransform((4, 2)),
+            id="translation composes to identity + scale",
+        ),
+        pytest.param(
+            ((0, -1, 7), (1, 0, 3)),
+            ((1, 0, -7), (0, 1, -3)),
+            RotationTransform(((0, -1), (1, 0))),
+            id="translation composes to identity + rotation",
+        ),
+    ],
+)
+def test_affine_composed_with_simplifies(earlier, later, expected):
+    earlier_t = AffineTransform(affine=earlier)
+    later_t = AffineTransform(affine=later)
+    composed = later_t.composed_with(earlier_t)
+
+    assert isinstance(composed, type(expected))
+    assert composed == expected
+
+
+@pytest.mark.parametrize(
+    "earlier,later,expected",
+    [
+        pytest.param(
+            ((2, 0, 3), (0, 2, 5)),
+            ((3, 0, 7), (0, 3, 11)),
+            ((6, 0, 16), (0, 6, 26)),
+            id="scale+translation",
+        ),
+        pytest.param(
+            ((0, -1, 0), (1, 0, 0)),
+            ((1, 0, 2), (0, 1, 3)),
+            ((0, -1, 2), (1, 0, 3)),
+            id="rotation then translation",
+        ),
+        pytest.param(
+            ((1, 0.3, 0), (0, 1, 0)),
+            ((1, 0, 0), (0, 1, 0)),
+            ((1, 0.3, 0), (0, 1, 0)),
+            id="shear+identity",
+        ),
+    ],
+)
+def test_affine_composed_with_does_not_simplify_combinations(earlier, later, expected):
+    composed = cast(AffineTransform, AffineTransform(affine=later).composed_with(AffineTransform(affine=earlier)))
+
+    assert composed.affine == expected
+
+
+def test_affines_with_dimension_mismatch_do_not_compose():
+    earlier_2d = AffineTransform(
+        affine=(
+            (1, 0, 0),
+            (0, 1, 0),
+        )
+    )
+    later_3d = AffineTransform(
+        affine=(
+            (1, 0, 0, 0),
+            (0, 1, 0, 0),
+            (0, 0, 1, 0),
+        )
+    )
+
+    assert later_3d.composed_with(earlier_2d) is None
+    assert earlier_2d.composed_with(later_3d) is None
+
+
+@pytest.mark.parametrize(
+    "transform",
+    [
+        IdentityTransform(),
+        ScaleTransform(scale=(0.5, 0.25)),
+        TranslationTransform(translation=(0.5, 0.25)),
+        RotationTransform(
+            rotation=(
+                (1, 0, 0, 0),
+                (0, 0, 0, -1),
+                (0, 0, 1, 0),
+                (0, 1, 0, 0),
+            )
+        ),
+        AffineTransform(affine=((2, 0, 3), (0, 4, 8))),
+    ],
+)
+def test_affine_composed_with_inverse_simplifies_to_identity(transform):
+    assert isinstance(transform.inverted().composed_with(transform), IdentityTransform)
+    assert isinstance(transform.composed_with(transform.inverted()), IdentityTransform)
+
+
 @pytest.mark.parametrize(
     "original, inverse",
     [
