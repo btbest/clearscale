@@ -442,6 +442,79 @@ def test_affine_composed_with_inverse_simplifies_to_identity(transform):
     assert isinstance(transform.composed_with(transform.inverted()), IdentityTransform)
 
 
+def test_coordinates_and_displacements_reject_non_strings():
+    with pytest.raises(ValueError, match="requires a non-empty path"):
+        _ = CoordinatesTransform(path=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="interpolation must be a non-empty string"):
+        _ = CoordinatesTransform(path="t/coords.zarr", interpolation=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Expected non-empty path"):
+        _ = CoordinatesTransform.from_ome_zarr({"path": 1})
+    with pytest.raises(ValueError, match="Expected interpolation string"):
+        _ = CoordinatesTransform.from_ome_zarr({"path": "t/coords.zarr", "interpolation": 1})
+    with pytest.raises(ValueError, match="requires a non-empty path"):
+        _ = DisplacementsTransform(path=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="interpolation must be a non-empty string"):
+        _ = DisplacementsTransform(path="t/vectors.zarr", interpolation=1)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="Expected non-empty path"):
+        _ = DisplacementsTransform.from_ome_zarr({"path": 1})
+    with pytest.raises(ValueError, match="Expected interpolation string"):
+        _ = DisplacementsTransform.from_ome_zarr({"path": "t/vectors.zarr", "interpolation": 1})
+
+
+def test_coordinates_and_displacements_cannot_invert_or_compose():
+    coords = CoordinatesTransform(path="t/coords.zarr", interpolation="linear")
+    assert not coords.is_invertible
+    with pytest.raises(ValueError, match="generally not invertible"):
+        _ = coords.inverted()
+    assert coords.composed_with(IdentityTransform()) is None
+
+    displacements = DisplacementsTransform(path="t/vectors.zarr", interpolation="linear")
+    assert not displacements.is_invertible
+    with pytest.raises(ValueError, match="generally not invertible"):
+        _ = displacements.inverted()
+    assert displacements.composed_with(IdentityTransform()) is None
+
+
+def test_coordinates_can_be_bound_and_chained_arbitrarily():
+    coords1 = CoordinatesTransform(path="t/coords1.zarr", interpolation="linear")
+    coords2 = CoordinatesTransform(path="t/coords2.zarr", interpolation="linear")
+    source = _sys_ref("source", "cyx")
+    target = _sys_ref("target", "tzyx")
+
+    _bound = coords1.bound(source=source, target=target)
+
+    seq = TransformSequence((coords1, coords2))
+    _bound_seq = seq.bound(source=source, target=target)
+
+    # Identity normally requires equal source and target dimensionality.
+    # Coords is "everything goes", so it removes this constraint when chained with identity.
+    seq2 = TransformSequence((IdentityTransform(), coords1, coords2))
+    _bound_seq2 = seq2.bound(source=source, target=target)
+
+    seq3 = TransformSequence((coords1, coords2, IdentityTransform()))
+    _bound_seq3 = seq3.bound(source=source, target=target)
+
+
+def test_displacements_bound_reject_changed_axes():
+    displacements = DisplacementsTransform(path="t/vectors.zarr", interpolation="linear")
+    source = _sys_ref("source", "cyx")
+    target = _sys_ref("target", "tzyx")
+
+    with pytest.raises(ValueError, match="source and target must be same dimensionality"):
+        _ = displacements.bound(source=source, target=target)
+
+
+def test_displacements_bound_reject_changed_axes_within_sequence():
+    displacements = DisplacementsTransform(path="t/vectors.zarr", interpolation="linear")
+    displacements2 = DisplacementsTransform(path="t/vectors2.zarr", interpolation="linear")
+    source = _sys_ref("source", "cyx")
+    target = _sys_ref("target", "tzyx")
+
+    seq = TransformSequence((displacements, displacements2))
+    with pytest.raises(ValueError, match="source and target must be same dimensionality"):
+        _ = seq.bound(source=source, target=target)
+
+
 @pytest.mark.parametrize(
     "original, inverse",
     [
@@ -1094,3 +1167,121 @@ def test_transform_graph_keeps_bound_transforms_from_generator():
     graph = TransformGraph(t for t in (transform,))
 
     assert graph.transforms == (transform,)
+
+
+@pytest.mark.parametrize(
+    ("ome_dict", "expected_type", "expected_roundtrip"),
+    [
+        pytest.param(
+            {"type": "identity"},
+            IdentityTransform,
+            {"type": "identity"},
+            id="identity",
+        ),
+        pytest.param(
+            {"type": "scale", "scale": [1, 0]},
+            ScaleTransform,
+            {"type": "scale", "scale": [1.0, 0.0]},  # include a pathological zero-scale
+            id="scale",
+        ),
+        pytest.param(
+            {"type": "translation", "translation": [1, 0]},
+            TranslationTransform,
+            {"type": "translation", "translation": [1.0, 0.0]},
+            id="translation",
+        ),
+        pytest.param(
+            {"type": "affine", "affine": [[1, 0, 2], [0, 1, 3]]},
+            AffineTransform,
+            {"type": "affine", "affine": [[1.0, 0.0, 2.0], [0.0, 1.0, 3.0]]},
+            id="affine",
+        ),
+        pytest.param(
+            {"type": "rotation", "rotation": [[0, -1], [1, 0]]},
+            RotationTransform,
+            {"type": "rotation", "rotation": [[0.0, -1.0], [1.0, 0.0]]},
+            id="rotation",
+        ),
+        pytest.param(
+            {"type": "coordinates", "path": "coordinateTransformations/coords", "interpolation": "linear"},
+            CoordinatesTransform,
+            {"type": "coordinates", "path": "coordinateTransformations/coords", "interpolation": "linear"},
+            id="coordinates",
+        ),
+        pytest.param(
+            {"type": "displacements", "path": "coordinateTransformations/displacements"},
+            DisplacementsTransform,
+            {"type": "displacements", "path": "coordinateTransformations/displacements"},
+            id="displacements",
+        ),
+        pytest.param(
+            {"type": "sequence", "transformations": [{"type": "identity"}]},
+            TransformSequence,
+            {"type": "sequence", "transformations": [{"type": "identity"}]},
+            id="sequence",
+        ),
+        pytest.param(
+            {"type": "mapAxis", "mapAxis": [1, 0]},
+            MapAxisTransform,
+            {"type": "mapAxis", "mapAxis": [1, 0]},
+            id="mapAxis",
+        ),
+        pytest.param(
+            {"type": "projectAxis", "droppedInputs": [0], "createdOutputs": [0]},
+            ProjectAxisTransform,
+            {"type": "projectAxis", "droppedInputs": [0], "createdOutputs": [0]},
+            id="projectAxis",
+        ),
+        pytest.param(
+            {
+                "type": "bijection",
+                "input": {"name": "source"},
+                "output": {"name": "target"},
+                "forward": {"type": "scale", "path": "coordinateTransformations/forward"},
+                "inverse": {"type": "scale", "path": "coordinateTransformations/inverse"},
+            },
+            BijectionTransform,
+            {
+                "type": "bijection",
+                "input": {"name": "source"},
+                "output": {"name": "target"},
+                "forward": {"type": "scale", "path": "coordinateTransformations/forward"},
+                "inverse": {"type": "scale", "path": "coordinateTransformations/inverse"},
+            },
+            id="bijection",
+        ),
+        pytest.param(
+            {
+                "type": "byDimension",
+                "transformations": [
+                    {"inputAxes": [0], "outputAxes": [0], "transformation": {"type": "scale", "scale": [2.0]}},
+                    {
+                        "inputAxes": [1],
+                        "outputAxes": [1],
+                        "transformation": {"type": "translation", "translation": [3.0]},
+                    },
+                ],
+            },
+            ByDimensionTransform,
+            {
+                "type": "byDimension",
+                "transformations": [
+                    {"inputAxes": [0], "outputAxes": [0], "transformation": {"type": "scale", "scale": [2.0]}},
+                    {
+                        "inputAxes": [1],
+                        "outputAxes": [1],
+                        "transformation": {"type": "translation", "translation": [3.0]},
+                    },
+                ],
+            },
+            id="byDimension",
+        ),
+    ],
+)
+def test_transform_from_ome_zarr_parses_all_transform_types(ome_dict, expected_type, expected_roundtrip):
+    """Note that without `input` and `output`, all of these examples are actually invalid.
+    Outside a TransformGraph, we can read and round-trip them anyway."""
+    transform = Transform.from_ome_zarr(ome_dict)
+
+    assert isinstance(transform, expected_type)
+    assert transform.to_ome_zarr("0.6.dev4") == expected_roundtrip

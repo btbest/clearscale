@@ -392,10 +392,9 @@ class Transform(ABC):
         The common properties (input/output) are handled in the base class."""
         pass
 
-    @staticmethod
-    def _source_ndim_always_eq_target_ndim() -> bool:
+    def _source_ndim_must_eq_target_ndim(self) -> bool:
         """For most transform types, this is True.
-        Only ProjectAxisTransform and ByDimensionTransform can modify ndim."""
+        Only Coordinates, ProjectAxis, ByDimension can modify ndim."""
         return True
 
     def __post_init__(self) -> None:
@@ -516,6 +515,10 @@ class Transform(ABC):
             return RotationTransform.from_ome_zarr(ome_dict)
         elif t_type == "affine":
             return AffineTransform.from_ome_zarr(ome_dict)
+        elif t_type == "coordinates":
+            return CoordinatesTransform.from_ome_zarr(ome_dict)
+        elif t_type == "displacements":
+            return DisplacementsTransform.from_ome_zarr(ome_dict)
         elif t_type == "mapAxis":
             return MapAxisTransform.from_ome_zarr(ome_dict)
         elif t_type == "projectAxis":
@@ -586,13 +589,11 @@ class Transform(ABC):
 
         if (
             ndim is None
-            and self._source_ndim_always_eq_target_ndim()
             and source_axes is not None
             and target_axes is not None
+            and self._source_ndim_must_eq_target_ndim()
             and len(source_axes) != len(target_axes)
         ):
-            # Payload gives no axis information.
-            # `_source_ndim_always_eq_target_ndim` says source and target must be equal dimensionality.
             raise ValueError(
                 f"{self.__class__.__name__} source and target must be same dimensionality: "
                 f"source {list(source_axes)} vs target {list(target_axes)}"
@@ -964,9 +965,8 @@ class AffineTransform(Transform):
         rows, cols = matrix_shape(self.affine)
         return cols - 1, rows
 
-    @staticmethod
-    def _source_ndim_always_eq_target_ndim() -> bool:
-        return False
+    def _source_ndim_must_eq_target_ndim(self) -> bool:
+        return True
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "AffineTransform":
@@ -1011,6 +1011,124 @@ class AffineTransform(Transform):
     def _translation(self):
         assert self.affine, "Ensure `self.affine is not None` before calling"
         return tuple(row[-1] for row in self.affine)
+
+
+@dataclass(frozen=True, slots=True)
+class CoordinatesTransform(Transform):
+    path: RelativePath
+    interpolation: Optional[str] = None
+
+    @property
+    def is_invertible(self) -> bool:
+        return False
+
+    def inverted(self) -> "Transform":
+        raise ValueError("CoordinatesTransform is generally not invertible.")
+
+    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
+        return None
+
+    def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
+        result: Dict[str, Any] = {"type": "coordinates", "path": self.path}
+        if self.interpolation is not None:
+            result["interpolation"] = self.interpolation
+        return result
+
+    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+        return None
+
+    def _source_ndim_must_eq_target_ndim(self) -> bool:
+        return False
+
+    @classmethod
+    def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "CoordinatesTransform":
+        source, target = cls._parse_source_and_target(ome_dict)
+        return cls(
+            path=_require_path(ome_dict, transform_type="coordinates"),
+            interpolation=cls._parse_interpolation(ome_dict),
+            _ome_zarr_name=cls._parse_name(ome_dict),
+            source=source,
+            target=target,
+        )
+
+    def __post_init__(self):
+        if not isinstance(self.path, str) or not self.path:
+            raise ValueError(f"CoordinatesTransform requires a non-empty path. Received: {self.path!r}")
+        if self.interpolation is not None and (not isinstance(self.interpolation, str) or not self.interpolation):
+            raise ValueError(
+                f"CoordinatesTransform interpolation must be a non-empty string. Received: {self.interpolation!r}"
+            )
+        Transform.__post_init__(self)
+
+    def _validate_bound_axes(self) -> None:
+        return None
+
+    @staticmethod
+    def _parse_interpolation(ome_dict: Mapping[str, Any]) -> Optional[str]:
+        interpolation = ome_dict.get("interpolation")
+        if interpolation is None:
+            return None
+        if not isinstance(interpolation, str) or not interpolation:
+            raise ValueError(
+                f"Invalid coordinates transform metadata. Expected interpolation string, received: {interpolation!r}"
+            )
+        return interpolation
+
+
+@dataclass(frozen=True, slots=True)
+class DisplacementsTransform(Transform):
+    path: RelativePath
+    interpolation: Optional[str] = None
+
+    @property
+    def is_invertible(self) -> bool:
+        return False
+
+    def inverted(self) -> "Transform":
+        raise ValueError("DisplacementsTransform is generally not invertible.")
+
+    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
+        return None
+
+    def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
+        result: Dict[str, Any] = {"type": "displacements", "path": self.path}
+        if self.interpolation is not None:
+            result["interpolation"] = self.interpolation
+        return result
+
+    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+        return None
+
+    @classmethod
+    def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "DisplacementsTransform":
+        source, target = cls._parse_source_and_target(ome_dict)
+        return cls(
+            path=_require_path(ome_dict, transform_type="displacements"),
+            interpolation=cls._parse_interpolation(ome_dict),
+            _ome_zarr_name=cls._parse_name(ome_dict),
+            source=source,
+            target=target,
+        )
+
+    def __post_init__(self):
+        if not isinstance(self.path, str) or not self.path:
+            raise ValueError(f"DisplacementsTransform requires a non-empty path. Received: {self.path!r}")
+        if self.interpolation is not None and (not isinstance(self.interpolation, str) or not self.interpolation):
+            raise ValueError(
+                f"DisplacementsTransform interpolation must be a non-empty string. Received: {self.interpolation!r}"
+            )
+        Transform.__post_init__(self)
+
+    @staticmethod
+    def _parse_interpolation(ome_dict: Mapping[str, Any]) -> Optional[str]:
+        interpolation = ome_dict.get("interpolation")
+        if interpolation is None:
+            return None
+        if not isinstance(interpolation, str) or not interpolation:
+            raise ValueError(
+                f"Invalid displacements transform metadata. Expected interpolation string, received: {interpolation!r}"
+            )
+        return interpolation
 
 
 @dataclass(frozen=True, slots=True)
@@ -1152,8 +1270,7 @@ class ProjectAxisTransform(Transform):
         # The payload can only imply a *minimum* axis count. That's not helpful for callers here.
         return None
 
-    @staticmethod
-    def _source_ndim_always_eq_target_ndim() -> bool:
+    def _source_ndim_must_eq_target_ndim(self) -> bool:
         return False
 
     @classmethod
@@ -1275,6 +1392,9 @@ class TransformSequence(Transform):
             return None
         return first_ndim[0], last_ndim[1]
 
+    def _source_ndim_must_eq_target_ndim(self) -> bool:
+        return all(t._source_ndim_must_eq_target_ndim() for t in self.transforms)
+
     def __hash__(self):
         return hash(self.transforms)
 
@@ -1328,7 +1448,7 @@ class TransformSequence(Transform):
         for transform in self.transforms:
             ndim = transform._ndim_by_payload()
             if ndim is None:
-                if not transform._source_ndim_always_eq_target_ndim():
+                if not transform._source_ndim_must_eq_target_ndim():
                     earlier_target_ndim = None
                     earlier = None
                 continue
@@ -1707,8 +1827,7 @@ class ByDimensionTransform(Transform):
         #  *at least* one axis. It might have more, but the others don't flow into a target, i.e. are dropped.
         return None
 
-    @staticmethod
-    def _source_ndim_always_eq_target_ndim() -> bool:
+    def _source_ndim_must_eq_target_ndim(self) -> bool:
         return False
 
     @classmethod
