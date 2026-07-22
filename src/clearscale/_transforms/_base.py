@@ -838,7 +838,7 @@ class TransformGraph:
         validate_rfc5_connectedness=False,
     ) -> Optional[List[Transform]]:
         if source == target:
-            return [IdentityTransform(source=source, target=target)]
+            return []
 
         # Adjacency - could be worth caching for performance
         graph = defaultdict(list)
