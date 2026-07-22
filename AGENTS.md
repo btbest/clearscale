@@ -3,12 +3,12 @@
 `src/clearscale/`, in order from lowest to highest level:
 
 - `_axis_values.py` defines primitives (Shape, Unit, PixelSize, ...)
-- `_transforms.py` defines the transformation graph primitives for OME-Zarr 0.6 concepts
+- `_transforms` contains the new concepts from OME-Zarr 0.6. `_base.py` defines the transformation graph, transform base class and TransformSequence (which still interacts with the graph). `_transform_types.py` implements the various Transform subclasses according to the OME-Zarr 0.6 spec
 - `_multiscale.py` defines the primary user-value objects (Scale, Multiscale, BlueprintShapes and BlueprintFactors)
-- `services` currently only breaks out helpers for `_multiscale.py`.
+- `services` breaks out static helpers, mostly for `_multiscale.py`. `matrices.py` is for `_transforms` (Rotation, Affine)
 - `_translation_shifts.py` defines public helpers for diagnosing and calculating coordinate offsets introduced by scaling functions (related to `_multiscale.py`)
 - `_scene.py` defines the Scene concept of OME-Zarr 0.6
-- `ome_zarr.py` lives outside of this hierarchy; it currently provides some user-facing helpers for `Multiscale`
+- `ome_zarr.py` lives outside of this hierarchy; it provides user-facing helpers for `Multiscale`
 
 Dependencies should flow only downward in this list.
 Lower-level modules must not import higher-level modules.
