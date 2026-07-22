@@ -1,19 +1,21 @@
 import functools
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Mapping, Union, Tuple, Literal
+from typing import Any, Dict, Iterable, Mapping, Union, Tuple, Literal
 from typing import Optional, List
 
 from clearscale._errors import MismatchingMultiscaleError
 from clearscale._multiscale import Multiscale
 from clearscale._transforms import (
     RelativePath,
+    CoordinateSystem,
     CoordinateSystemName,
     NodeRef,
     _UnresolvedRef,
     AnyRef,
     Transform,
     TransformGraph,
+    TransformGraphNode,
 )
 
 MultiscalesByPath = Mapping[RelativePath, Multiscale]
@@ -66,6 +68,38 @@ class Scene:
             all_transforms.append(ms._get_interface_transform())  # noqa: package-private, not class-private
             all_transforms.extend(ms._transform_graph.transforms)  # noqa: package-private, not class-private
         return TransformGraph(all_transforms)
+
+    @classmethod
+    def from_graph_edges(
+        cls,
+        source_transform_targets: Iterable[
+            Tuple[Union[Multiscale, NodeRef[CoordinateSystem]], Transform, Union[Multiscale, NodeRef[CoordinateSystem]]]
+        ],
+    ) -> "Scene":
+        """
+        Basic low-level constructor by directly specifying graph edges (source->transform->target):
+        Scene.from_graph_edges([
+            (moving_ms1, AffineTransform(...), fixed_ms),
+            (moving_ms2, AffineTransform(...), fixed_ms),
+        ])
+        """
+        transforms = []
+        for source_node, transform, target_node in source_transform_targets:
+            if isinstance(source_node, Multiscale):
+                source = source_node._intrinsic_ref
+            elif isinstance(source_node, NodeRef) and isinstance(source_node.owner, CoordinateSystem):
+                source = source_node
+            else:
+                raise TypeError("Use CoordinateSystem.as_ref(name) to use a CoordinateSystem in a Scene.")
+            if isinstance(target_node, Multiscale):
+                target = target_node._intrinsic_ref
+            elif isinstance(target_node, NodeRef) and isinstance(target_node.owner, CoordinateSystem):
+                target = target_node
+            else:
+                raise TypeError("Use CoordinateSystem.as_ref(name) to use a CoordinateSystem in a Scene.")
+            bound = transform.bound(source=source, target=target)
+            transforms.append(bound)
+        return cls(_internal_graph=TransformGraph(transforms=transforms), _multiscale_paths={})
 
     @classmethod
     def from_ome_zarr(cls, scene_attrs: Dict[str, Any]):
