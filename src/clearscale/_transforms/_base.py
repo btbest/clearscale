@@ -28,6 +28,7 @@ from clearscale._axis_values import (
     OrderedAxes,
     Unit,
 )
+from clearscale._errors import NoSuchCoordinateSystemError, MismatchingMultiscaleError
 
 RelativePath = str  # 0.6.dev4: scene["coordinateTransformations"][]["input"]["path"]
 CoordinateSystemName = str  # str from ["input"]["name"]
@@ -176,6 +177,7 @@ class CoordinateSystem(_AxisMapping[AxisKey, AxisSemantics], TransformGraphNode)
         return self.keys()
 
     def as_ref(self, name: CoordinateSystemName) -> NodeRef["CoordinateSystem"]:
+        """For CoordinateSystem, making a ref means giving the coordinate system a name."""
         return NodeRef(str(name), self)
 
     @classmethod
@@ -397,7 +399,10 @@ class Transform(ABC):
             return ref
         new_node = path_nodes.get(ref.path)
         if new_node is not None and ref.name is not None:
-            return new_node.as_ref(ref.name)
+            try:
+                return new_node.as_ref(ref.name)
+            except NoSuchCoordinateSystemError:
+                raise MismatchingMultiscaleError(path=ref.path, name=ref.name)
         return ref
 
     @staticmethod

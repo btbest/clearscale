@@ -4,6 +4,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Dict, Mapping, Union, Tuple, Literal
 from typing import Optional, List
 
+from clearscale._errors import MismatchingMultiscaleError
 from clearscale._multiscale import Multiscale
 from clearscale._transforms import (
     RelativePath,
@@ -86,7 +87,13 @@ class Scene:
         transforms = []
         resolved_paths = {}
         for t in self._internal_graph.transforms:
-            maybe_resolved_t = t.with_resolved(multiscales_by_path)
+            try:
+                maybe_resolved_t = t.with_resolved(multiscales_by_path)
+            except MismatchingMultiscaleError as e:
+                raise ValueError(
+                    f"Invalid pairing: The Multiscale provide for path {e.path!r} does not seem to be the expected one "
+                    f"(expected coordinate system named {e.name!r})."
+                ) from None
             transforms.append(maybe_resolved_t)
             resolved_paths.update(self._resolved_multiscale_paths(t, maybe_resolved_t, multiscales_by_path))
         paths = dict(self._multiscale_paths)

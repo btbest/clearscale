@@ -10,6 +10,11 @@ from clearscale import (
     discrete_bin_center,
     half_pixel_space_preservation,
 )
+from clearscale._transforms import CoordinateSystem, NodeRef
+
+
+def _ref(axes: str, name: str) -> NodeRef[CoordinateSystem]:
+    return CoordinateSystem.without_semantics(axes).as_ref(name)
 
 
 def test_blueprint_hash_matches_value_equality():
@@ -21,16 +26,16 @@ def test_blueprint_hash_matches_value_equality():
 
 
 def test_multiscale_equality_and_hash_are_value_based():
-    left = Multiscale({"s0": Scale(Shape(y=2, x=3))})
-    right = Multiscale({"s0": Scale(Shape(y=2, x=3))})
+    left = Multiscale({"s0": Scale(Shape(y=2, x=3))}, _intrinsic_ref=_ref("yx", "physical"))
+    right = Multiscale({"s0": Scale(Shape(y=2, x=3))}, _intrinsic_ref=_ref("yx", "physical"))
 
     assert left == right
     assert {left, right} == {left}, "Value hash should lead to collapse in sets"
 
 
 def test_multiscale_refs_are_hashable():
-    left = Multiscale({"s0": Scale(Shape(y=2, x=3))})
-    right = Multiscale({"s0": Scale(Shape(y=2, x=3))})
+    left = Multiscale({"s0": Scale(Shape(y=2, x=3))}, _intrinsic_ref=_ref("yx", "physical"))
+    right = Multiscale({"s0": Scale(Shape(y=2, x=3))}, _intrinsic_ref=_ref("yx", "physical"))
 
     assert len({left.as_ref("physical"), right.as_ref("physical")}) == 2
 

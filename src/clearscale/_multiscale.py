@@ -36,6 +36,7 @@ from clearscale._axis_values import (
     OrderedAxes,
     AxisKey,
 )
+from clearscale._errors import NoSuchCoordinateSystemError
 from clearscale._transforms import (
     CoordinateSystemName,
     CoordinateSystem,
@@ -881,6 +882,9 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         return TransformGraph.single_isolated_system(sys_ref)
 
     def as_ref(self, name: CoordinateSystemName) -> NodeRef["Multiscale"]:
+        """For Multiscale, making a ref means selecting one of their coordinate systems by name."""
+        if name not in (ref.name for ref in self._transform_graph.all_system_refs):
+            raise NoSuchCoordinateSystemError(name)
         return NodeRef(name=str(name), owner=self)
 
     def _get_interface_transform(self):

@@ -5,7 +5,9 @@ from tests.ome_zarr.scene_examples import scene_stitching
 
 
 def _multiscale():
-    return Multiscale({"s0": Scale(Shape(y=2, x=3))})
+    ms = Multiscale({"s0": Scale(Shape(y=2, x=3))})
+    object.__setattr__(ms._intrinsic_ref, "name", "physical")
+    return ms
 
 
 def test_stitching_example(scene_stitching):

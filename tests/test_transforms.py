@@ -22,6 +22,7 @@ from clearscale._transforms import (
     TranslationTransform,
     TransformGraph,
     _UnresolvedRef,
+    NodeRef,
 )
 
 
@@ -105,7 +106,11 @@ def test_bound_identity_rejects_endpoint_axis_count_mismatch():
 
 
 def test_resolving_transform_revalidates_endpoint_axes():
-    multiscale = Multiscale({"s0": Scale(Shape(z=1, y=2, x=3))})
+
+    def _ref(axes: str, name: str) -> NodeRef[CoordinateSystem]:
+        return CoordinateSystem.without_semantics(axes).as_ref(name)
+
+    multiscale = Multiscale({"s0": Scale(Shape(z=1, y=2, x=3))}, _intrinsic_ref=_ref("yx", "physical"))
     world = _sys_ref("world", "yx")
     transform = TranslationTransform(
         translation=(0, 0),
