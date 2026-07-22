@@ -1,6 +1,6 @@
 import pytest
 
-from clearscale import Multiscale, Scale, Scene, Shape
+from clearscale import Multiscale, Scale, Scene, Shape, Translation
 from clearscale._transforms import (
     CoordinateSystem,
     TranslationTransform,
@@ -8,6 +8,7 @@ from clearscale._transforms import (
     _UnresolvedRef,
     ScaleTransform,
     AffineTransform,
+    NodeRef,
 )
 
 
@@ -86,6 +87,75 @@ def test_from_graph_edges_rejects_coordinate_system_and_other_types():
 
     with pytest.raises(TypeError, match="Use CoordinateSystem.as_ref"):
         Scene.from_graph_edges([(image, ScaleTransform((2, 2, 2)), world)])  # type: ignore[arg-type]
+
+
+def test_scene_from_tiles_translations_empty():
+    scene = Scene.from_tiles_translations([])
+
+    assert scene.transforms_between("world", "world") is None
+    assert scene._internal_graph.transforms == ()
+
+
+def test_scene_from_tiles_translations_multiple_multiscales():
+    ms1 = _multiscale(z=2, y=3, x=4)
+    ms2 = _multiscale(z=2, y=3, x=4)
+    ms3 = _multiscale(z=2, y=3, x=4)
+
+    t1 = Translation(z=0, y=0, x=0)
+    t2 = Translation(z=0, y=512, x=0)
+    t3 = Translation(z=0, y=0, x=512)
+
+    scene = Scene.from_tiles_translations([(ms1, t1), (ms2, t2), (ms3, t3)])
+
+    p1 = scene.transforms_between(ms1, "world")
+    p2 = scene.transforms_between(ms2, "world")
+    p3 = scene.transforms_between(ms3, "world")
+
+    assert p1
+    assert p2
+    assert p3
+    assert len(p1) == len(p2) == len(p3) == 1
+
+    world_ref = p1[0].target
+    assert world_ref != ms1._intrinsic_ref, "central reference system should be copy, not the exact object"
+    assert isinstance(world_ref, NodeRef), "for pyright"
+    assert world_ref.owner != ms1._intrinsic_ref.owner, "central reference system should be copy, not the exact object"
+    assert p2[0].target == world_ref
+    assert p3[0].target == world_ref
+
+    assert p1[0] == TranslationTransform.from_translation(t1).bound(source=ms1._intrinsic_ref, target=world_ref)
+    assert p2[0] == TranslationTransform.from_translation(t2).bound(source=ms2._intrinsic_ref, target=world_ref)
+    assert p3[0] == TranslationTransform.from_translation(t3).bound(source=ms3._intrinsic_ref, target=world_ref)
+
+    p13 = scene.transforms_between(ms1, ms3)
+    assert p13
+    assert len(p13) == 2
+
+
+def test_scene_from_tiles_translations_rejects_mismatching_axes_across_multiscales():
+    ms1 = _multiscale(z=2, y=3, x=4)
+    ms2 = _multiscale(c=2, y=3, x=4)
+
+    with pytest.raises(ValueError, match="identical axis keys"):
+        Scene.from_tiles_translations(
+            [
+                (ms1, Translation.identity("zyx")),
+                (ms2, Translation.identity("cyx")),
+            ]
+        )
+
+
+def test_scene_from_tiles_translations_rejects_mismatching_axes_in_translations():
+    ms1 = _multiscale(z=2, y=3, x=4)
+    ms2 = _multiscale(z=2, y=3, x=4)
+
+    with pytest.raises(ValueError, match="identical axis keys"):
+        Scene.from_tiles_translations(
+            [
+                (ms1, Translation.identity("zyx")),
+                (ms2, Translation.identity("cyx")),
+            ]
+        )
 
 
 def test_transforms_between_accepts_path_addressed_unresolved_refs():

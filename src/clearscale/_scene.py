@@ -5,6 +5,7 @@ from typing import Any, Dict, Iterable, Mapping, Union, Tuple, Literal
 from typing import Optional, List
 
 from clearscale._errors import MismatchingMultiscaleError
+from clearscale._axis_values import Translation
 from clearscale._multiscale import Multiscale
 from clearscale._transforms import (
     RelativePath,
@@ -16,6 +17,7 @@ from clearscale._transforms import (
     Transform,
     TransformGraph,
     TransformGraphNode,
+    TranslationTransform,
 )
 
 MultiscalesByPath = Mapping[RelativePath, Multiscale]
@@ -25,6 +27,7 @@ UserFacingCoordinateSystemKey = Union[
     Tuple[Multiscale, CoordinateSystemName],
     Dict[Literal["path", "name"], Union[RelativePath, CoordinateSystemName]],
 ]
+Node = Union[Multiscale, NodeRef[CoordinateSystem]]
 
 
 @dataclass(frozen=True)
@@ -72,9 +75,7 @@ class Scene:
     @classmethod
     def from_graph_edges(
         cls,
-        source_transform_targets: Iterable[
-            Tuple[Union[Multiscale, NodeRef[CoordinateSystem]], Transform, Union[Multiscale, NodeRef[CoordinateSystem]]]
-        ],
+        source_transform_targets: Iterable[Tuple[Node, Transform, Node]],
     ) -> "Scene":
         """
         Basic low-level constructor by directly specifying graph edges (source->transform->target):
@@ -85,24 +86,78 @@ class Scene:
         """
         transforms = []
         for source_node, transform, target_node in source_transform_targets:
-            if isinstance(source_node, Multiscale):
-                source = source_node._intrinsic_ref
-            elif isinstance(source_node, NodeRef) and isinstance(source_node.owner, CoordinateSystem):
-                source = source_node
-            else:
-                raise TypeError("Use CoordinateSystem.as_ref(name) to use a CoordinateSystem in a Scene.")
-            if isinstance(target_node, Multiscale):
-                target = target_node._intrinsic_ref
-            elif isinstance(target_node, NodeRef) and isinstance(target_node.owner, CoordinateSystem):
-                target = target_node
-            else:
-                raise TypeError("Use CoordinateSystem.as_ref(name) to use a CoordinateSystem in a Scene.")
+            source = cls._node_to_coord_sys_ref(source_node)
+            target = cls._node_to_coord_sys_ref(target_node)
             bound = transform.bound(source=source, target=target)
             transforms.append(bound)
         return cls(_internal_graph=TransformGraph(transforms=transforms), _multiscale_paths={})
 
     @classmethod
-    def from_ome_zarr(cls, scene_attrs: Dict[str, Any]):
+    def from_star_graph(
+        cls, multiscales: Iterable[Tuple[Multiscale, Transform]], *, center: Optional[Node] = None
+    ) -> "Scene":
+        """
+        Low-level constructor for star-shaped graphs by specifying partial edges (source->transform).
+        All transforms will target the node provided as `center`.
+        If `center` is not provided, all transforms will target the first entry in `multiscales`.
+        The first Multiscale should be paired with an IdentityTransform in that case.
+        """
+        multiscales = list(multiscales)
+        if not multiscales and not center:
+            return cls(_internal_graph=TransformGraph(transforms=()), _multiscale_paths={})
+        elif not center:
+            center = multiscales[0][0]
+
+        central_system = cls._node_to_coord_sys_ref(center).owner.copy()
+        central_ref = central_system.as_ref("world")
+
+        return cls(
+            _internal_graph=TransformGraph(
+                transforms=(
+                    transform.bound(
+                        source=multiscale._intrinsic_ref,
+                        target=central_ref,
+                    )
+                    for multiscale, transform in multiscales
+                )
+            ),
+            _multiscale_paths={},
+        )
+
+    @classmethod
+    def from_tiles_translations(cls, translations: Iterable[Tuple[Multiscale, Translation]]) -> "Scene":
+        """
+        Proof-of-concept constructor for tiling use-case. More generally useful might be something like
+        from_tiles(tiles: Iterable[Tuple[Multiscale, AxisValues]]), or "from_clearscale"..?
+        With an internal Transform.from_axis_values that can map clearscale types to accurate Transform representations.
+        E.g. Translation -> TranslationTransform,
+        Factor -> ScaleTransform,
+        PixelOffset -> TranslationTransform (after multiplying the offset by the right PixelSize)
+        """
+        translations = list(translations)
+        if not translations:
+            return cls(_internal_graph=TransformGraph(transforms=()), _multiscale_paths={})
+
+        first_ms = translations[0][0]
+        for multiscale, translation in translations:
+            # TODO: Validate units?
+            if multiscale.axes() != first_ms.axes():
+                raise ValueError(
+                    "All Multiscales in a stitched Scene must have identical axis keys. "
+                    f"Expected {first_ms.axes()!r}, received {multiscale.axes()!r}."
+                )
+            if translation.keys() != first_ms.axes():
+                raise ValueError(
+                    "All Translations for a stitched Scene must have identical axis keys. "
+                    f"Expected {first_ms.axes()!r}, received {translation.keys()!r}."
+                )
+
+        return cls.from_star_graph(
+            (ms, TranslationTransform.from_translation(translation)) for ms, translation in translations
+        )
+
+    @classmethod
+    def from_ome_zarr(cls, scene_attrs: Dict[str, Any]) -> "Scene":
         # TODO: accept an optional callable get_multiscale_meta;
         #  where the default provided implementation simply chooses
         #  the first entry in the multiscales-array at the path.
@@ -138,6 +193,8 @@ class Scene:
     def to_ome_zarr(
         self, *, version: str = "0.6.dev4", multiscales_by_path: Optional[MultiscalesByPath] = None
     ) -> Dict:
+        # TODO: I think this is broken (would not dump all coord systems from the graph)
+        # should probably delegate to self._internal_graph.to_ome_zarr, no?
         coordinate_system_dicts = []
         for ref in self._internal_graph.system_refs:
             assert ref.owner is not None, "Dev error: all refs to CoordinateSystems must be owned"
@@ -206,6 +263,18 @@ class Scene:
             return name_matches[0] if name_matches else None
 
         raise TypeError(f"Unsupported key type for coordinate system lookup: {key}")
+
+    @classmethod
+    def _node_to_coord_sys_ref(cls, node: Node) -> NodeRef[CoordinateSystem]:
+        if isinstance(node, Multiscale):
+            ref = node._intrinsic_ref
+        elif isinstance(node, NodeRef) and isinstance(node.owner, CoordinateSystem):
+            ref = node
+        else:
+            raise TypeError(
+                f"Use CoordinateSystem.as_ref(name) to use a CoordinateSystem in a Scene. Received: {node!r}"
+            )
+        return ref
 
     @staticmethod
     def _resolved_multiscale_paths(
