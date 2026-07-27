@@ -16,6 +16,10 @@ from typing import (
     List,
     Literal,
     Hashable,
+    ItemsView,
+    KeysView,
+    ValuesView,
+    Tuple,
 )
 
 AxisKey = Hashable
@@ -89,13 +93,13 @@ class _AxisMapping(ABCMapping[AxisKeyT, AxisMappedHashable], Generic[AxisKeyT, A
     def __len__(self):
         return len(self._mapping)
 
-    def keys(self):
+    def keys(self) -> KeysView[AxisKeyT]:
         return self._mapping.keys()
 
-    def values(self):
+    def values(self) -> ValuesView[AxisMappedHashable]:
         return self._mapping.values()
 
-    def items(self):
+    def items(self) -> ItemsView[AxisKeyT, AxisMappedHashable]:
         return self._mapping.items()
 
     def __hash__(self):
@@ -111,10 +115,10 @@ class _AxisMapping(ABCMapping[AxisKeyT, AxisMappedHashable], Generic[AxisKeyT, A
     def copy(self: _AxisMappingSelf) -> _AxisMappingSelf:
         return self.__class__(self._mapping)
 
-    def to_tuple(self):
+    def to_tuple(self) -> Tuple[AxisMappedHashable, ...]:
         return tuple(self.values())
 
-    def to_list(self):
+    def to_list(self) -> List[AxisMappedHashable]:
         return list(self.values())
 
 

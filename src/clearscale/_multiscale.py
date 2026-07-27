@@ -21,6 +21,10 @@ from typing import (
     Dict,
     Any,
     Hashable,
+    Iterator,
+    ItemsView,
+    KeysView,
+    ValuesView,
 )
 
 from clearscale._axis_values import (
@@ -157,22 +161,22 @@ class _ScaleMapping(ABC, ABCMapping[ScaleKey, ValueType], Generic[ValueType]):
     def __contains__(self, key: object) -> bool:
         return key in self._mapping
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[ScaleKey]:
         return iter(self._mapping)
 
     def __len__(self):
         return len(self._mapping)
 
-    def keys(self):
+    def keys(self) -> KeysView[ScaleKey]:
         return self._mapping.keys()
 
-    def values(self):
+    def values(self) -> ValuesView[ValueType]:
         return self._mapping.values()
 
     def first_value(self) -> ValueType:
         return next(iter(self.values()))
 
-    def items(self):
+    def items(self) -> ItemsView[ScaleKey, ValueType]:
         return self._mapping.items()
 
     def __hash__(self):
@@ -181,7 +185,7 @@ class _ScaleMapping(ABC, ABCMapping[ScaleKey, ValueType], Generic[ValueType]):
     def __eq__(self, other):
         if isinstance(other, _ScaleMapping):
             return self._mapping == other._mapping
-        if isinstance(other, OrderedDict) or isinstance(other, dict):
+        if isinstance(other, ABCMapping):
             return self._mapping == other
         return False
 
@@ -235,7 +239,7 @@ class _ScaleMapping(ABC, ABCMapping[ScaleKey, ValueType], Generic[ValueType]):
         items = [(k, v) for k, v in self.items() if k in keys[start_idx:]]
         return self.__class__(items)
 
-    def _generate_and_validate_new_keys(self, keys_pattern_or_func: Callable):
+    def _generate_and_validate_new_keys(self, keys_pattern_or_func: Callable) -> List[ScaleKey]:
         new_keys = []
         for i, (key, value) in enumerate(self.items()):
             try:
@@ -281,7 +285,7 @@ class _ScaledAxisValues(_ScaleMapping[AxisValuesType], Generic[AxisValuesType]):
                     f"All values must have the same axes. (Expected {axes}, received {v.keys()} for key '{k}')"
                 )
 
-    def to_dict(self) -> OrderedDict[str, OrderedDict[str, Union[int, float]]]:
+    def to_dict(self) -> OrderedDict[str, OrderedDict[AxisKey, Union[int, float]]]:
         return OrderedDict([(scale_key, OrderedDict(axis_values)) for scale_key, axis_values in self.items()])
 
     def _with_values(self: _ScaledAxisValuesSelf, values: Sequence[AxisValuesType]) -> _ScaledAxisValuesSelf:
