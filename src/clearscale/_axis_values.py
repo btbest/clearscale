@@ -30,6 +30,7 @@ AxisMappedPrimitive = TypeVar("AxisMappedPrimitive", int, float, str)
 Axes = Union[Collection[AxisKey], str]
 Scalar = Union[int, float, numbers.Real]
 ShapeLike = Union["Shape", Mapping[AxisKeyT, int]]
+FactorLike = Union["Factor", Mapping[AxisKeyT, float]]
 RoundingFunction = Callable[[float], int]
 RoundingMethod = Union[Literal["ceil"], Literal["floor"], Literal["round"], RoundingFunction]
 _AxisMappingSelf = TypeVar("_AxisMappingSelf", bound="_AxisMapping[Any, Any]")
@@ -49,7 +50,8 @@ OrderedAxes = _Ordered[AxisKey]
 
 
 def _axis_in(axis: AxisKey, axes: Axes) -> bool:
-    """Required because `axis` can be any Hashable, and e.g. `my_data_obj in 'tczyx'` raises TypeError"""
+    """Required whenever `axes` should tolerate strings like "xyz",
+    because `axis` can be any Hashable, and `hashable_obj in 'tczyx'` raises TypeError"""
     if isinstance(axes, str):
         return isinstance(axis, str) and axis in axes
     return axis in axes
@@ -197,23 +199,33 @@ class _AxisValues(ABC, _AxisMapping[AxisKeyT, AxisMappedPrimitive], Generic[Axis
         keep_items = [(a, self[a] if _axis_in(a, axes) else self._default()) for a in self]
         return self.__class__(keep_items)
 
-    def with_values(self, other: Mapping[AxisKeyT, Union[Scalar, str]], axes: Axes):
-        if not axes:
-            return self.__class__(self)
+    def with_values(
+        self: _AxisValuesSelf, other: Mapping[AxisKeyT, Union[Scalar, str]], *, only: Optional[Axes] = None
+    ) -> _AxisValuesSelf:
+        if not isinstance(other, ABCMapping):
+            raise TypeError(f"Pass {{axis: value}} mapping. Received: {other!r}")
+        if not other or (only is not None and not only):
+            return self
         replaced_items = []
-        for a in self:
-            new_value: Union[Scalar, str] = self[a]
-            if _axis_in(a, axes) and a in other and other[a] is not None:
-                new_value = other[a]
-            if type(self[a]) != type(new_value):
-                if isinstance(new_value, numbers.Integral) and isinstance(self[a], float):
-                    new_value = float(new_value)
-                else:
-                    raise TypeError(
-                        f"During attempted merge: Cannot cast '{new_value}' of type "
-                        f"{type(new_value).__name__} to {type(self[a]).__name__}"
-                    )
-            replaced_items.append((a, new_value))
+        for a, old_v in self.items():
+            new_v: Union[Scalar, str] = old_v
+            if (only is None or _axis_in(a, only)) and a in other and other[a] is not None:
+                new_v = other[a]
+            if type(old_v) is type(new_v):
+                pass
+            elif isinstance(old_v, bool) and isinstance(new_v, numbers.Integral):
+                new_v = bool(new_v)
+            elif isinstance(old_v, int) and not isinstance(old_v, bool) and isinstance(new_v, numbers.Integral):
+                # bools are instances of int
+                new_v = int(new_v)
+            elif isinstance(old_v, float) and isinstance(new_v, numbers.Real):
+                new_v = float(new_v)
+            else:
+                raise TypeError(
+                    f"Invalid attempt to replace values in {type(self).__name__}: Cannot cast "
+                    f"{new_v!r} of type {type(new_v).__name__} to {type(old_v).__name__}"
+                )
+            replaced_items.append((a, new_v))
 
         return self.__class__(replaced_items)
 

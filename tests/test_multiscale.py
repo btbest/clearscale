@@ -9,6 +9,8 @@ from clearscale import (
     Unit,
     discrete_bin_center,
     half_pixel_space_preservation,
+    BlueprintFactors,
+    Factor,
 )
 from clearscale._transforms import CoordinateSystem, NodeRef
 
@@ -38,6 +40,55 @@ def test_multiscale_refs_are_hashable():
     right = Multiscale({"s0": Scale(Shape(y=2, x=3))}, _intrinsic_ref=_ref("yx", "physical"))
 
     assert len({left.as_ref("physical"), right.as_ref("physical")}) == 2
+
+
+def test_with_sizes_broadcasts_single_shape_to_all_scales():
+    shapes = BlueprintShapes({"s0": Shape(x=10, y=20), "s1": Shape(x=30, y=40)})
+
+    result = shapes.with_sizes({"x": 100})
+    assert result == BlueprintShapes({"s0": Shape(x=100, y=20), "s1": Shape(x=100, y=40)})
+
+
+def test_with_sizes_updates_only_specified_scales():
+    shapes = BlueprintShapes({"s0": Shape(x=10, y=20), "s1": Shape(x=30, y=40)})
+
+    result = shapes.with_sizes({"s1": {"y": 99}})
+    assert result == BlueprintShapes({"s0": Shape(x=10, y=20), "s1": Shape(x=30, y=99)})
+
+
+def test_with_sizes_updates_multiple_scales_independently():
+    shapes = BlueprintShapes({"s0": Shape(x=10, y=20), "s1": Shape(x=30, y=40)})
+
+    result = shapes.with_sizes({"s0": {"x": 1}, "s1": {"y": 2}})
+    assert result == BlueprintShapes({"s0": Shape(x=1, y=20), "s1": Shape(x=30, y=2)})
+
+
+def test_with_sizes_ignores_unknown_scale_keys():
+    shapes = BlueprintShapes({"s0": Shape(x=10, y=20), "s1": Shape(x=30, y=40)})
+
+    result = shapes.with_sizes({"unknown": {"z": 1}})
+    assert result == shapes
+
+
+def test_with_sizes_only_axes_limits_broadcast_update():
+    shapes = BlueprintShapes({"s0": Shape(x=10, y=20), "s1": Shape(x=30, y=40)})
+
+    result = shapes.with_sizes({"x": 5, "y": 6}, only_axes="x")
+    assert result == BlueprintShapes({"s0": Shape(x=5, y=20), "s1": Shape(x=5, y=40)})
+
+
+def test_with_sizes_only_axes_limits_nested_update():
+    shapes = BlueprintShapes({"s0": Shape(x=10, y=20), "s1": Shape(x=30, y=40)})
+
+    result = shapes.with_sizes({"s0": {"x": 5, "y": 6}}, only_axes="x")
+    assert result == BlueprintShapes({"s0": Shape(x=5, y=20), "s1": Shape(x=30, y=40)})
+
+
+def test_with_factors_works_like_with_sizes():
+    shapes = BlueprintFactors({"s0": Factor(x=1.0, y=2.0), "s1": Factor(x=3.0, y=4.0)})
+
+    result = shapes.with_factors({"s0": {"x": 10.0, "y": 11.0}}, only_axes="x")
+    assert result == BlueprintFactors({"s0": Factor(x=10.0, y=2.0), "s1": Factor(x=3.0, y=4.0)})
 
 
 def test_blueprint_shapes_apply_to_scale_derives_scale_metadata_from_base():

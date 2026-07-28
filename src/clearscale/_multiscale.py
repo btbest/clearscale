@@ -35,6 +35,7 @@ from clearscale._axis_values import (
     Translation,
     PixelOffset,
     ShapeLike,
+    FactorLike,
     Axes,
     RoundingMethod,
     OrderedAxes,
@@ -291,6 +292,26 @@ class _ScaledAxisValues(_ScaleMapping[AxisValuesType], Generic[AxisValuesType]):
     def _with_values(self: _ScaledAxisValuesSelf, values: Sequence[AxisValuesType]) -> _ScaledAxisValuesSelf:
         return self.__class__(zip(self.keys(), values))
 
+    def _with_values_by_axes(
+        self: _ScaledAxisValuesSelf,
+        other: Union[ShapeLike, Mapping[ScaleKey, ShapeLike], FactorLike, Mapping[ScaleKey, FactorLike]],
+        *,
+        only_axes: Optional[Axes] = None,
+    ) -> _ScaledAxisValuesSelf:
+        if not isinstance(other, ABCMapping):
+            raise TypeError(f"Pass {{axis: value}} or {{scale_key: {{axis: value}}}} mapping. Received: {other!r}")
+        if not other or (only_axes is not None and not only_axes):
+            return self
+        is_other_nested = isinstance(next(iter(other.values())), ABCMapping)
+        if is_other_nested:
+            new_values = [
+                axis_values.with_values(other[scale_key], only=only_axes) if scale_key in other else axis_values
+                for scale_key, axis_values in self.items()
+            ]
+            return self._with_values(new_values)
+        # Broadcast across scales
+        return self._with_values([axis_values.with_values(other, only=only_axes) for axis_values in self.values()])
+
     def with_axes(self: _ScaledAxisValuesSelf, axes: OrderedAxes) -> _ScaledAxisValuesSelf:
         return self._with_values([value.with_axes(axes) for value in self.values()])
 
@@ -461,6 +482,20 @@ class BlueprintShapes(_ScaledAxisValues[Shape]):
 
         return tuple(scaled)
 
+    def with_sizes(
+        self, other: Union[ShapeLike, Mapping[ScaleKey, ShapeLike]], *, only_axes: Optional[Axes] = None
+    ) -> "BlueprintShapes":
+        """
+        Replace shape values in this blueprint.
+        Provide either
+        - a blueprint-like mapping {scale_key: {axis: size}}
+          to replace the values for those axes at that scale
+        - a shape-like mapping {axis: size}
+          to replace the values for those axes in *all* scales.
+        Optionally limit the replacing to `only` axes (and ignore other axes in the provided mapping).
+        """
+        return super()._with_values_by_axes(other, only_axes=only_axes)
+
     def to_factors(self, reference: Optional[Shape] = None) -> "BlueprintFactors":
         if reference is None:
             reference = self.first_value()
@@ -499,9 +534,6 @@ class BlueprintShapes(_ScaledAxisValues[Shape]):
             )
 
         return Multiscale(scales)
-
-    def with_sizes(self, other: ShapeLike, axes: Axes):
-        return self._with_values([shape.with_values(other, axes) for shape in self.values()])
 
     @staticmethod
     def _validate_resampling_step(step: Union[int, float]):
@@ -584,6 +616,20 @@ class BlueprintFactors(_ScaledAxisValues[Factor]):
 
         all_axes = next(iter(self.values())).keys()
         return tuple(axis for axis in all_axes if axis in scaled)
+
+    def with_factors(
+        self, other: Union[FactorLike, Mapping[ScaleKey, FactorLike]], *, only_axes: Optional[Axes] = None
+    ) -> "BlueprintFactors":
+        """
+        Replace factor values in this blueprint.
+        Provide either
+        - a blueprint-like mapping {scale_key: {axis: factor}}
+          to replace the values for those axes at that scale
+        - a shape-like mapping {axis: factor}
+          to replace the values for those axes in *all* scales.
+        Optionally limit the replacing to `only` axes (and ignore other axes in the provided mapping).
+        """
+        return super()._with_values_by_axes(other, only_axes=only_axes)
 
     def to_shapes(self, reference: ShapeLike, *, rounding: RoundingMethod) -> BlueprintShapes:
         ref = Shape(reference)
