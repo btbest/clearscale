@@ -25,9 +25,9 @@ def test_downscale_2_example():
     ms = Multiscale.from_shapes(scaling_blueprint, base=base)
 
     # 4. Export
-    zarr_group.attrs["ome"]["multiscales"] = [ms.to_ome_zarr(version="0.6.dev4")]
+    zarr_group.attrs["ome"]["multiscales"] = [ms.to_ome_zarr(version="0.6.rc0")]
 
-    written = ms.to_ome_zarr(version="0.6.dev4")
+    written = ms.to_ome_zarr(version="0.6.rc0")
     assert len(written["coordinateSystems"]) == 1
     written_system_name = written["coordinateSystems"][0]["name"]  # Capture the randomly generated name
 
@@ -81,7 +81,7 @@ def test_downscale_2_example():
                 "path": "s3",
             },
         ],
-        "version": "0.6.dev4",
+        "version": "0.6.rc0",
     }
 
     assert written == expected

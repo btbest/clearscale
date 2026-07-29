@@ -190,9 +190,7 @@ class Scene:
         graph = replace(self._internal_graph, transforms=tuple(transforms))
         return replace(self, _internal_graph=graph, _multiscale_paths=paths)
 
-    def to_ome_zarr(
-        self, *, version: str = "0.6.dev4", multiscales_by_path: Optional[MultiscalesByPath] = None
-    ) -> Dict:
+    def to_ome_zarr(self, *, version: str = "0.6.rc0", multiscales_by_path: Optional[MultiscalesByPath] = None) -> Dict:
         # TODO: I think this is broken (would not dump all coord systems from the graph)
         # should probably delegate to self._internal_graph.to_ome_zarr, no?
         coordinate_system_dicts = []

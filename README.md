@@ -32,8 +32,8 @@ for scale_key, target_shape in scaling_blueprint.items():
 base = Scale(shape, pixel_size, unit)
 ms = Multiscale.from_shapes(scaling_blueprint, base=base)
 zarr_group.attrs["ome"] = {
-    "version": "0.6.dev4",
-    "multiscales": [ms.to_ome_zarr(version="0.6.dev4")]
+    "version": "0.6.rc0",
+    "multiscales": [ms.to_ome_zarr(version="0.6.rc0")]
 }
 ```
 
@@ -57,7 +57,7 @@ zarr_group = zarr.open_group(os.path.expanduser("~/cltest.ome.zarr"), mode="w")
 
 * Zero dependencies, runs with Python 3.10+
 * Reads Neuroglancer Precomputed and OME-Zarr metadata (all versions)
-* Writes OME-Zarr versions 0.4, 0.5 and 0.6.dev4
+* Writes OME-Zarr versions 0.4, 0.5 and 0.6.rc0
 * Saves you learning about the metadata format(s)
 * Helps you write expressive code
 * Metadata manipulation lives alongside data manipulation

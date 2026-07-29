@@ -363,10 +363,10 @@ zarr_group.attrs = {
     }
 }
 
-ome_ms = ms.to_ome_zarr(version="0.6.dev4")
+ome_ms = ms.to_ome_zarr(version="0.6.rc0")
 zarr_group.attrs = {
     "ome": {
-        "version": "0.6.dev4", 
+        "version": "0.6.rc0", 
         "multiscales": [ome_ms]
     }
 }

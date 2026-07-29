@@ -40,8 +40,8 @@ def without_known_feature_gaps(metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 @pytest.fixture
-def maximal_ome_zarr_0_6_dev4() -> MultiscaleMetadataExample:
-    return maximal_multiscale_example("0.6.dev4")
+def maximal_ome_zarr_0_6_rc0() -> MultiscaleMetadataExample:
+    return maximal_multiscale_example("0.6.rc0")
 
 
 @pytest.mark.filterwarnings("ignore:.*not in OME-Zarr canonical order.*:UserWarning")
@@ -80,17 +80,17 @@ def test_multiscale_roundtrips_maximal_ome_zarr(example: MultiscaleMetadataExamp
 
 
 def test_multiscale_roundtrip_preserves_coordinate_system_order(
-    maximal_ome_zarr_0_6_dev4: MultiscaleMetadataExample,
+    maximal_ome_zarr_0_6_rc0: MultiscaleMetadataExample,
 ):
-    metadata = maximal_ome_zarr_0_6_dev4.metadata
+    metadata = maximal_ome_zarr_0_6_rc0.metadata
     metadata["coordinateSystems"] = list(reversed(metadata["coordinateSystems"]))
 
     multiscale = Multiscale.from_ome_zarr(
-        metadata, shape_source=make_all_singleton_shapes(maximal_ome_zarr_0_6_dev4.ndim)
+        metadata, shape_source=make_all_singleton_shapes(maximal_ome_zarr_0_6_rc0.ndim)
     )
-    output_json = multiscale.to_ome_zarr(version="0.6.dev4")
+    output_json = multiscale.to_ome_zarr(version="0.6.rc0")
 
-    expected_output = with_written_version(without_known_feature_gaps(metadata), "0.6.dev4")
+    expected_output = with_written_version(without_known_feature_gaps(metadata), "0.6.rc0")
     assert output_json == with_approximate_floats(expected_output)
 
 

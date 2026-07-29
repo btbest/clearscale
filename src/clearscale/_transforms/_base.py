@@ -30,7 +30,7 @@ from clearscale._axis_values import (
 )
 from clearscale._errors import NoSuchCoordinateSystemError, MismatchingMultiscaleError
 
-RelativePath = str  # 0.6.dev4: scene["coordinateTransformations"][]["input"]["path"]
+RelativePath = str  # 0.6.rc0: scene["coordinateTransformations"][]["input"]["path"]
 CoordinateSystemName = str  # str from ["input"]["name"]
 NodesByPath = Mapping[RelativePath, "TransformGraphNode"]
 TransformGraphNodeT = TypeVar("TransformGraphNodeT", bound="TransformGraphNode", covariant=True)
@@ -210,7 +210,7 @@ class CoordinateSystem(_AxisMapping[AxisKey, AxisSemantics], TransformGraphNode)
         self,
         *,
         name: CoordinateSystemName,
-        version="0.6.dev4",
+        version="0.6.rc0",
         axis_types: Union[None, Literal["infer"], Mapping[AxisKey, Literal["space", "time", "channel"]]] = None,
         unit: Optional[Unit] = None,
         long_names: Optional[Mapping[AxisKey, str]] = None,
@@ -594,7 +594,7 @@ class TransformSequence(Transform):
 
     def to_ome_zarr(self, version: str, *, nodes_by_path: Optional[NodesByPath] = None) -> Dict[str, Any]:
         if version in PRE_TRANSFORMS_VERSIONS:
-            raise ValueError("TransformSequence cannot be serialized to OME-Zarr older than 0.6.dev4")
+            raise ValueError("TransformSequence cannot be serialized to OME-Zarr older than 0.6.rc0")
         return super(TransformSequence, self).to_ome_zarr(version, nodes_by_path=nodes_by_path)
 
     def __post_init__(self):
@@ -810,17 +810,17 @@ class TransformGraph:
         graph = TransformGraph(transforms, system_refs=tuple(named_systems))
         return graph
 
-    def to_ome_zarr(self, version="0.6.dev4", nodes_by_path: Optional[NodesByPath] = None) -> Dict[str, Any]:
+    def to_ome_zarr(self, version="0.6.rc0", nodes_by_path: Optional[NodesByPath] = None) -> Dict[str, Any]:
         """
         Returns dict like {
             "coordinateSystems": List[Dict] (maybe)
             "coordinateTransformations: List[Dict] (required)
         }
         """
-        if version != "0.6.dev4":
+        if version != "0.6.rc0":
             warnings.warn(
                 f"Unsupported OME-Zarr version {version!r}. "
-                f"This method only targets 0.6.dev4 as of 07/2026. Metadata may be invalid."
+                f"This method only targets 0.6.rc0 as of 07/2026. Metadata may be invalid."
             )
         systems = [
             ref.owner.to_ome_zarr(name=ref.name, version=version)

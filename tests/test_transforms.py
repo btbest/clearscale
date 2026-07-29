@@ -38,7 +38,7 @@ def test_transform_name_round_trips():
     )
 
     assert transform._ome_zarr_name == "pixel-size"
-    assert transform.to_ome_zarr("0.6.dev4") == {
+    assert transform.to_ome_zarr("0.6.rc0") == {
         "type": "scale",
         "scale": [2.0],
         "name": "pixel-size",
@@ -83,7 +83,7 @@ def test_path_backed_scale_round_trips_and_no_ndim():
     assert isinstance(scale, ScaleTransform)
     assert scale._ndim_by_payload() is None
     assert not scale.is_invertible
-    assert scale.to_ome_zarr("0.6.dev4") == {"type": "scale", "path": "coordinateTransformations/scale"}
+    assert scale.to_ome_zarr("0.6.rc0") == {"type": "scale", "path": "coordinateTransformations/scale"}
 
 
 def test_path_backed_translation_round_trips_and_no_ndim():
@@ -91,7 +91,7 @@ def test_path_backed_translation_round_trips_and_no_ndim():
     assert isinstance(translation, TranslationTransform)
     assert translation._ndim_by_payload() is None
     assert not translation.is_invertible
-    assert translation.to_ome_zarr("0.6.dev4") == {
+    assert translation.to_ome_zarr("0.6.rc0") == {
         "type": "translation",
         "path": "coordinateTransformations/translation",
     }
@@ -127,7 +127,7 @@ def test_path_backed_rotation_round_trips_and_no_ndim():
     assert isinstance(rotation, RotationTransform)
     assert rotation._ndim_by_payload() is None
     assert not rotation.is_invertible
-    assert rotation.to_ome_zarr("0.6.dev4") == {
+    assert rotation.to_ome_zarr("0.6.rc0") == {
         "type": "rotation",
         "path": "coordinateTransformations/rotation",
     }
@@ -237,7 +237,7 @@ def test_path_backed_affine_round_trips_and_no_ndim():
     assert isinstance(affine, AffineTransform)
     assert affine._ndim_by_payload() is None
     assert not affine.is_invertible
-    assert affine.to_ome_zarr("0.6.dev4") == {
+    assert affine.to_ome_zarr("0.6.rc0") == {
         "type": "affine",
         "path": "coordinateTransformations/affine",
     }
@@ -1289,4 +1289,4 @@ def test_transform_from_ome_zarr_parses_all_transform_types(ome_dict, expected_t
     transform = Transform.from_ome_zarr(ome_dict)
 
     assert isinstance(transform, expected_type)
-    assert transform.to_ome_zarr("0.6.dev4") == expected_roundtrip
+    assert transform.to_ome_zarr("0.6.rc0") == expected_roundtrip
