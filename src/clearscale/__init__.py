@@ -1,5 +1,6 @@
 """Multiscale abstractions for clearly coded metadata provenance"""
 
+from clearscale._affines import Affine, Coefficient, Linear
 from clearscale._axis_values import Factor, PixelOffset, PixelSize, Shape, Translation, Unit
 from clearscale._multiscale import (
     BlueprintFactors,
@@ -34,4 +35,7 @@ __all__ = [
     "half_pixel_space_preservation",
     "first_value_decimation",
     "detect_translation_shift",
+    "Affine",
+    "Coefficient",
+    "Linear",
 ]

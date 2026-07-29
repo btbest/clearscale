@@ -109,7 +109,7 @@ class Scale:
     def with_axes(self, axes: OrderedAxes) -> "Scale":
         """Build a Scale with all properties produced by their respective `.with_axes`."""
         if not axes:
-            raise ValueError(f"Cannot create empty {self.__class__.__name__}. Attempted reorder to: '{axes}'")
+            raise ValueError(f"Cannot create empty {self.__class__.__name__}. Attempted reorder to: {axes!r}")
         return Scale(
             shape=self.shape.with_axes(axes),
             pixel_size=self.pixel_size.with_axes(axes),
@@ -463,7 +463,7 @@ class BlueprintShapes(_ScaledAxisValues[Shape]):
             on_duplicate_prefer=on_duplicate_prefer,
         )
 
-    def axes(self):
+    def axes(self) -> Iterable[AxisKey]:
         return self.first_value().keys()
 
     def scaled_axes(self) -> Tuple[AxisKey, ...]:
@@ -601,7 +601,7 @@ class BlueprintFactors(_ScaledAxisValues[Factor]):
     def from_multiscale(cls, multiscale: "Multiscale", reference: Shape) -> "BlueprintFactors":
         return BlueprintShapes.from_multiscale(multiscale).to_factors(reference)
 
-    def axes(self):
+    def axes(self) -> Iterable[AxisKey]:
         return self.first_value().keys()
 
     @property

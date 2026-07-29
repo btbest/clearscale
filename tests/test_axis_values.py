@@ -1,6 +1,6 @@
 import math
-
 import pytest
+from typing import cast
 
 from clearscale import Factor, PixelOffset, PixelSize, Shape, Translation
 
@@ -127,6 +127,20 @@ def test_shape_divides_shape_to_factor_using_scaling_to_semantics():
     result = original_shape / resized_shape
 
     assert_axis_values(result, Factor, [("y", 4.0), ("x", 0.5)])
+
+
+@pytest.mark.parametrize(
+    ("translation", "axes", "expected"),
+    [
+        pytest.param(Translation.identity(("x", "y")), ("x", "y"), True, id="identity"),
+        pytest.param(Translation({"x": 1.0, "y": 0.0}), ("y",), True, id="identity along subset"),
+        pytest.param(Translation({"x": 1.0, "y": 0.0}), ("x",), False, id="non-identity along subset"),
+        pytest.param(Translation({"x": 1.0, "y": 2.0}), ("x", "y"), False, id="non-identity"),
+        pytest.param(Translation({"x": 1.0, "y": 2.0}), (), True, id="empty axes"),
+    ],
+)
+def test_translation_is_identity_along(translation, axes, expected):
+    assert cast(Translation, translation).is_identity_along(axes) is expected
 
 
 @pytest.mark.parametrize(

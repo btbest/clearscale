@@ -3,6 +3,7 @@
 `src/clearscale/`, in order from lowest to highest level:
 
 - `_axis_values.py` defines primitives (Shape, Unit, PixelSize, ...)
+- `_affines.py` defines nested AxisValues (Linear matrices, their Coefficient building block, and Affine container)
 - `_transforms` contains the new concepts from OME-Zarr 0.6. `_base.py` defines the transformation graph, transform base class and TransformSequence (which still interacts with the graph). `_transform_types.py` implements the various Transform subclasses according to the OME-Zarr 0.6 spec
 - `_multiscale.py` defines the primary user-value objects (Scale, Multiscale, BlueprintShapes and BlueprintFactors)
 - `services` breaks out static helpers, mostly for `_multiscale.py`. `matrices.py` is for `_transforms` (Rotation, Affine)
@@ -60,3 +61,4 @@ Class methods should be ordered from top to bottom like:
 
 - Strictly separate refactoring changes, and functional changes
 - Strictly separate moving large pieces of code from any modifications inside them
+- Agents must not insert optional white space. Do not add line breaks or indents that are not required for valid Python syntax. Formatting is done by the `black` pre-commit hook.

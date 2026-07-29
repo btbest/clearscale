@@ -115,6 +115,8 @@ class _AxisMapping(ABCMapping[AxisKeyT, AxisMappedHashable], Generic[AxisKeyT, A
         return False
 
     def copy(self: _AxisMappingSelf) -> _AxisMappingSelf:
+        """Doesn't provide much value, since everything is immutable anyway.
+        This is just to stay consistent with the plain dict interface."""
         return self.__class__(self._mapping)
 
     def to_tuple(self) -> Tuple[AxisMappedHashable, ...]:
@@ -142,18 +144,20 @@ class _AxisValues(ABC, _AxisMapping[AxisKeyT, AxisMappedPrimitive], Generic[Axis
     def with_axes(self: _AxisValuesSelf, axes: OrderedAxesT) -> _AxisValuesSelf:
         """Order like axes. Drop axes, or insert new axes with default value if necessary."""
         if not axes:
-            raise ValueError(f"Cannot create empty {self.__class__.__name__}. Attempted reorder to: '{axes}'")
+            raise ValueError(f"Cannot create empty {self.__class__.__name__}. Attempted reorder to: {axes!r}")
         reordered_items = [(a, self[a] if a in self else self._default()) for a in axes]
         return self.__class__(reordered_items)
 
     def with_axes_order(self: _AxisValuesSelf, axes: OrderedAxesT) -> _AxisValuesSelf:
-        """Order like given axes (but no new insertions)."""
-        reordered_items = [(a, self[a]) for a in axes if a in self]
-        if not reordered_items:
+        """Order like given axes (but no new insertions or drops)."""
+        if not axes:
+            raise ValueError(f"Cannot create empty {self.__class__.__name__}. Attempted reorder to {axes!r}.")
+        would_drop = tuple(a for a in self if a not in axes)
+        if would_drop:
             raise ValueError(
-                f"Cannot create empty {self.__class__.__name__}. "
-                f"None of the specified axes {axes} are present in {list(self.keys())}."
+                f"Cannot reorder {self.__class__.__name__} to axes {axes!r}. This would drop: {would_drop!r}."
             )
+        reordered_items = [(a, self[a]) for a in axes if a in self]
         return self.__class__(reordered_items)
 
     def without_axes_except(self: _AxisValuesSelf, axes: Axes) -> _AxisValuesSelf:
@@ -162,7 +166,7 @@ class _AxisValues(ABC, _AxisMapping[AxisKeyT, AxisMappedPrimitive], Generic[Axis
         if not kept_items:
             raise ValueError(
                 f"Cannot create empty {self.__class__.__name__}. "
-                f"None of the specified axes {axes} are present in {list(self.keys())}."
+                f"None of the specified axes {axes!r} are present in {list(self.keys())}."
             )
         return self.__class__(kept_items)
 
@@ -170,7 +174,7 @@ class _AxisValues(ABC, _AxisMapping[AxisKeyT, AxisMappedPrimitive], Generic[Axis
         """Drop given axes."""
         kept_items = [(a, self[a]) for a in self if not _axis_in(a, axes)]
         if not kept_items:
-            raise ValueError(f"Cannot create empty {self.__class__.__name__}. Removing {axes} would leave no axes.")
+            raise ValueError(f"Cannot create empty {self.__class__.__name__}. Removing {axes!r} would leave no axes.")
         return self.__class__(kept_items)
 
     def without_default_values(self: _AxisValuesSelf) -> _AxisValuesSelf:
@@ -509,6 +513,12 @@ class Translation(_AxisFloats):
         """True if this Translation is the identity translation (0.0 along all axes)."""
         return super().is_default()
 
+    def is_identity_along(self, axes: Axes) -> bool:
+        """True if this Translation is 0.0 for `axes`."""
+        if not axes:
+            return True
+        return self.with_axes(axes).is_identity()
+
     def __add__(self, other: object) -> Union["Translation", NotImplementedType]:
         if not isinstance(other, Translation):
             return NotImplemented
@@ -520,6 +530,14 @@ class Translation(_AxisFloats):
             return NotImplemented
         _require_identical_axes(self, other)
         return Translation((a, self[a] - other[a]) for a in self)
+
+    def with_identity(self, axes: Axes) -> "Translation":
+        """Reset the values for `axes` to 0.0."""
+        return super().with_default(axes)
+
+    def with_identity_except(self, axes: Axes) -> "Translation":
+        """Reset the values for all axes except `axes` to 0.0."""
+        return super().with_default_except(axes)
 
     def to_pixel_offset(
         self,
