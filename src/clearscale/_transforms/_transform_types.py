@@ -19,6 +19,7 @@ from clearscale._axis_values import (
 )
 from clearscale._services.matrices import (
     FloatMatrix,
+    FloatVector,
     is_identity_matrix,
     is_diagonal_matrix,
     is_rotation_matrix,
@@ -402,7 +403,7 @@ class AffineTransform(Transform):
             return None
         self_ndim = self._ndim_by_payload()
         earlier_ndim = earlier._ndim_by_payload()
-        if self_ndim is None or earlier_ndim is None or self_ndim[0] != earlier_ndim[0]:
+        if self_ndim is None or earlier_ndim is None or self_ndim[0] != earlier_ndim[1]:
             return None
         if not self._endpoints_can_chain_after(earlier):
             return None
@@ -410,27 +411,29 @@ class AffineTransform(Transform):
         new_t = tuple(
             a + b for a, b in zip(matrix_vector_multiply(self._linear(), earlier._translation()), self._translation())
         )
-        is_linear_identity = is_identity_matrix(new_linear, tolerance=IDENTITY_TOLERANCE)
-        is_translation_identity = all(abs(t) < IDENTITY_TOLERANCE for t in new_t)
-        if is_linear_identity and is_translation_identity:
-            return IdentityTransform(source=self._composed_source(earlier), target=self._composed_target(earlier))
-        elif is_linear_identity:
-            return TranslationTransform(
-                translation=new_t, source=self._composed_source(earlier), target=self._composed_target(earlier)
-            )
-        elif is_translation_identity:
-            if is_diagonal_matrix(new_linear, tolerance=IDENTITY_TOLERANCE):
-                return ScaleTransform(
-                    scale=tuple(new_linear[i][i] for i in range(len(new_linear))),
-                    source=self._composed_source(earlier),
-                    target=self._composed_target(earlier),
+        new_rows, new_cols = matrix_shape(new_linear)
+        if new_rows == new_cols:
+            is_linear_identity = is_identity_matrix(new_linear, tolerance=IDENTITY_TOLERANCE)
+            is_translation_identity = all(abs(t) < IDENTITY_TOLERANCE for t in new_t)
+            if is_linear_identity and is_translation_identity:
+                return IdentityTransform(source=self._composed_source(earlier), target=self._composed_target(earlier))
+            elif is_linear_identity:
+                return TranslationTransform(
+                    translation=new_t, source=self._composed_source(earlier), target=self._composed_target(earlier)
                 )
-            if is_rotation_matrix(new_linear, tolerance=IDENTITY_TOLERANCE):
-                return RotationTransform(
-                    rotation=new_linear,
-                    source=self._composed_source(earlier),
-                    target=self._composed_target(earlier),
-                )
+            elif is_translation_identity:
+                if is_diagonal_matrix(new_linear, tolerance=IDENTITY_TOLERANCE):
+                    return ScaleTransform(
+                        scale=tuple(new_linear[i][i] for i in range(len(new_linear))),
+                        source=self._composed_source(earlier),
+                        target=self._composed_target(earlier),
+                    )
+                if is_rotation_matrix(new_linear, tolerance=IDENTITY_TOLERANCE):
+                    return RotationTransform(
+                        rotation=new_linear,
+                        source=self._composed_source(earlier),
+                        target=self._composed_target(earlier),
+                    )
         affine = tuple(row + (new_t[i],) for i, row in enumerate(new_linear))
         return replace(
             self,
@@ -453,7 +456,7 @@ class AffineTransform(Transform):
         return cols - 1, rows
 
     def _source_ndim_must_eq_target_ndim(self) -> bool:
-        return True
+        return False
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "AffineTransform":
@@ -479,23 +482,20 @@ class AffineTransform(Transform):
             raise ValueError("AffineTransform requires exactly one of affine values or a path.")
         if self.affine is not None:
             affine = _require_rectangular_matrix(self.affine, "affine")
-            rows, cols = matrix_shape(affine)
+            _rows, cols = matrix_shape(affine)
             if cols < 2:
                 raise ValueError("AffineTransform matrix must have at least one input dimension and one offset column.")
-            if cols != rows + 1:
-                raise ValueError(
-                    "AffineTransform matrix must be the upper portion of the homogenous form (excluding last row)."
-                )
+            # Arbitrary rectangles permitted. Spec says: Interpret the shape as (output_ndim, input_ndim + 1).
             object.__setattr__(self, "affine", affine)
         elif not isinstance(self._ome_zarr_path, str) or not self._ome_zarr_path:
             raise ValueError(f"AffineTransform requires a non-empty path. Received: {self._ome_zarr_path!r}")
         Transform.__post_init__(self)
 
-    def _linear(self):
+    def _linear(self) -> FloatMatrix:
         assert self.affine, "Ensure `self.affine is not None` before calling"
         return tuple(row[:-1] for row in self.affine)
 
-    def _translation(self):
+    def _translation(self) -> FloatVector:
         assert self.affine, "Ensure `self.affine is not None` before calling"
         return tuple(row[-1] for row in self.affine)
 
@@ -747,11 +747,12 @@ class ProjectAxisTransform(Transform):
         )
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
-        return {
-            "type": "projectAxis",
-            "droppedInputs": list(self.drops),
-            "createdOutputs": list(self.inserts),
-        }
+        result: Dict[str, Any] = {"type": "projectAxis"}
+        if self.drops:
+            result["droppedInputs"] = list(self.drops)
+        if self.inserts:
+            result["createdOutputs"] = list(self.inserts)
+        return result
 
     def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
         # The payload can only imply a *minimum* axis count. That's not helpful for callers here.
@@ -972,7 +973,7 @@ class _ByDimensionChild:
             raise ValueError(f"Invalid byDimension transform item metadata. Received: {item_dict!r}")
         transformation_dict = item_dict.get("transformation")
         if not isinstance(transformation_dict, MappingABC):
-            raise ValueError(f"Invalid byDimension transform item metadata. Received: {item_dict!r}")
+            raise ValueError(f"Invalid byDimension transform item metadata. Received: {transformation_dict!r}")
         return cls(
             source_indices=_require_int_or_empty_tuple(
                 item_dict.get("inputAxes", ()), "inputAxes", transform_type="byDimension"

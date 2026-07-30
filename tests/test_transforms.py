@@ -250,9 +250,30 @@ def test_path_backed_affine_round_trips_and_no_ndim():
         ((0, 0, 0), (0, 0, 0)),  # 2d
         ((0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0)),  # 3d
         ((0, 0, 0, 0, 0), (0, 0, 0, 0, 0), (0, 0, 0, 0, 0), (0, 0, 0, 0, 0)),  # 4d
+        ((0, 0, 0),),  # 2d -> 1d
+        (
+            (0, 0),
+            (0, 0),
+        ),  # 1d -> 2d
+        (
+            (0, 0),
+            (0, 0),
+            (0, 0),
+        ),  # 1d -> 3d
+        (
+            (0, 0, 0),
+            (0, 0, 0),
+            (0, 0, 0),
+        ),  # 2d -> 3d
+        (
+            (0, 0, 0),
+            (0, 0, 0),
+            (0, 0, 0),
+            (0, 0, 0),
+        ),  # 2d -> 4d
     ],
 )
-def test_affine_instantiates_with_abbreviated_form(matrix):
+def test_affine_instantiates_with_any_rectangular(matrix):
     """The bottom row (0,...0, 1) of the homogenous form should not be included"""
     _ = AffineTransform(affine=matrix)
 
@@ -262,24 +283,8 @@ def test_affine_instantiates_with_abbreviated_form(matrix):
     [
         ((0,), "Expected 2D array"),
         (((0,),), "at least one input dimension and one offset column"),
-        (((0, 0, 0),), "upper portion of the homogenous"),
         (((0,), (0,)), "at least one input dimension and one offset column"),
         (((0,), (0, 1)), "Expected rectangular 2D array"),
-        (
-            (
-                (0, 0),
-                (0, 1),
-            ),
-            "upper portion of the homogenous",
-        ),
-        (
-            (
-                (0, 0),
-                (0, 0),
-                (0, 1),
-            ),
-            "upper portion of the homogenous",
-        ),
         (
             (
                 (0, 0),
@@ -288,26 +293,9 @@ def test_affine_instantiates_with_abbreviated_form(matrix):
             ),
             "Expected rectangular 2D array",
         ),
-        (
-            (
-                (0, 0, 0),
-                (0, 0, 0),
-                (0, 0, 1),
-            ),
-            "upper portion of the homogenous",
-        ),
-        (
-            (
-                (0, 0, 0),
-                (0, 0, 0),
-                (0, 0, 0),
-                (0, 0, 1),
-            ),
-            "upper portion of the homogenous",
-        ),
     ],
 )
-def test_affine_rejects_anything_but_ndim_by_ndim_plus1(matrix, expected_error):
+def test_affine_rejects_non_rectangular_or_too_few_cols(matrix, expected_error):
     with pytest.raises(ValueError, match=expected_error):
         _ = AffineTransform(affine=matrix)
 
@@ -321,14 +309,9 @@ def test_affine_transform_inverted():
 @pytest.mark.parametrize(
     "matrix",
     [
-        (
-            (1, 0, 0),
-            (0, 0, 0),
-        ),
-        (
-            (1, 2, 0),
-            (2, 4, 0),
-        ),
+        ((1, 0, 0), (0, 0, 0)),
+        ((1, 2, 0), (2, 4, 0)),
+        ((1, 0, 0),),
     ],
 )
 def test_affine_noninvertible(matrix):
@@ -337,6 +320,76 @@ def test_affine_noninvertible(matrix):
 
     with pytest.raises(ValueError, match="not invertible"):
         transform.inverted()
+
+
+@pytest.mark.parametrize(
+    "earlier,later,expected",
+    [
+        pytest.param(
+            ((1, 0), (0, 1)),
+            ((1, 0, 0),),
+            ((1, 0),),
+            id="1->2 then 2->1",
+        ),
+        pytest.param(
+            ((1, 0), (0, 0), (0, 0)),
+            ((1, 0, 0, 0), (0, 0, 0, 0)),
+            ((1, 0), (0, 0)),
+            id="1->3 then 3->2",
+        ),
+        pytest.param(
+            ((1, 0, 0),),
+            ((1, 0), (0, 1), (0, 0)),
+            ((1, 0, 0), (0, 0, 1), (0, 0, 0)),
+            id="2->1 then 1->3",
+        ),
+        pytest.param(
+            ((1, 0, 0), (0, 1, 0)),
+            ((1, 0, 0), (0, 1, 0)),
+            ((1, 0, 0), (0, 1, 0)),
+            id="square",
+        ),
+    ],
+)
+def test_affine_composed_with_matches_earlier_output_to_later_input_ndim(earlier, later, expected):
+    earlier_t = AffineTransform(affine=earlier)
+    later_t = AffineTransform(affine=later)
+
+    composed = later_t.composed_with(earlier_t)
+
+    assert composed is not None
+
+
+@pytest.mark.parametrize(
+    "earlier,later",
+    [
+        pytest.param(
+            ((1, 0), (0, 1)),
+            ((1, 0), (0, 1)),
+            id="1->2 then 1->2",
+        ),
+        pytest.param(
+            ((1, 0), (0, 1), (0, 0)),
+            ((1, 0), (0, 1)),
+            id="1->3 then 1->2",
+        ),
+        pytest.param(
+            ((1, 0, 0),),
+            ((1, 0, 0),),
+            id="2->1 then 2->1",
+        ),
+        pytest.param(
+            ((1, 0, 0), (0, 1, 0)),
+            ((1, 0), (0, 1), (0, 0)),
+            id="2->2 then 1->3",
+        ),
+    ],
+)
+def test_affine_composed_with_rejects_mismatching_dims(earlier, later):
+    earlier_t = AffineTransform(affine=earlier)
+    later_t = AffineTransform(affine=later)
+
+    assert later_t.composed_with(earlier_t) is None
 
 
 @pytest.mark.parametrize(

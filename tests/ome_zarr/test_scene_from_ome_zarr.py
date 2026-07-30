@@ -1,7 +1,14 @@
+import pytest
+
 from clearscale import Scene, Multiscale, Scale, Shape
 from clearscale._transforms import CoordinateSystem, TranslationTransform, _UnresolvedRef, TransformGraph
 
-from tests.ome_zarr.scene_examples import scene_stitching
+from tests.ome_zarr.scene_examples import (
+    all_invalid_scene_examples,
+    all_valid_scene_examples,
+    scene_registration,
+    scene_stitching,
+)
 
 
 def _multiscale():
@@ -10,14 +17,39 @@ def _multiscale():
     return ms
 
 
-def test_stitching_example(scene_stitching):
-    scene = Scene.from_ome_zarr(scene_stitching)
+def test_stitching_example():
+    scene = Scene.from_ome_zarr(scene_stitching())
     assert scene.unresolved_paths == ["tile_0", "tile_1", "tile_2", "tile_3"]
 
 
-def test_load_then_resolve(scene_stitching):
+def test_registration_example():
+    scene = Scene.from_ome_zarr(scene_registration())
+    assert scene.unresolved_paths == ["JRC2018F", "FCWB"]
+
+
+@pytest.mark.parametrize("meta", all_valid_scene_examples())
+def test_scene_public_examples_roundtrip(meta):
+    # https://ngff.openmicroscopy.org/specifications/dev/examples/transformations/transformations.html
+    roundtrip = Scene.from_ome_zarr(meta).to_ome_zarr(version="0.6.rc0")
+    assert "coordinateTransformations" in roundtrip
+    assert "coordinateTransformations" in meta
+    assert len(roundtrip["coordinateTransformations"]) == len(meta["coordinateTransformations"])
+    for actual, expected in zip(roundtrip["coordinateTransformations"], meta["coordinateTransformations"]):
+        # compare individually for easier debugging
+        assert actual == expected
+    # Full check because zip can miss one containing more items than the other
+    assert roundtrip == meta
+
+
+@pytest.mark.parametrize("meta", all_invalid_scene_examples())
+def test_scene_invalid_public_examples(meta):
+    with pytest.raises(ValueError, match="ByDimensionTransform target axes must be globally unique"):
+        _ = Scene.from_ome_zarr(meta)
+
+
+def test_load_then_resolve():
     paths = {path: _multiscale() for path in ["tile_0", "tile_1", "tile_2", "tile_3"]}
-    scene = Scene.from_ome_zarr(scene_stitching)
+    scene = Scene.from_ome_zarr(scene_stitching())
     assert not scene.is_fully_resolved
 
     resolved_scene = scene.with_resolved(paths)
