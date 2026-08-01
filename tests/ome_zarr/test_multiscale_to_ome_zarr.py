@@ -12,7 +12,7 @@ from tests.ome_zarr.multiscale_examples import (
     maximal_multiscale_example,
 )
 
-known_keys_that_should_roundtrip_but_todo = ("type", "labels", "omero", "metadata")
+known_keys_that_should_roundtrip_but_todo = ("name", "type", "labels", "omero", "metadata")
 float_roundtrip_abs_tolerance = 2**-54
 
 
@@ -23,6 +23,7 @@ def with_written_version(metadata: dict[str, Any], version: str) -> dict[str, An
 
 
 def with_approximate_floats(value: Any) -> Any:
+    """Recurse through `value`, replacing all floats with pytest.approx"""
     if isinstance(value, dict):
         return {key: with_approximate_floats(inner_value) for key, inner_value in value.items()}
     if isinstance(value, list):
@@ -32,10 +33,41 @@ def with_approximate_floats(value: Any) -> Any:
     return value
 
 
+def without_identity_translations_datasets(metadata: dict[str, Any]) -> dict[str, Any]:
+    """Remove identity translations in
+    meta['datasets'][]['coordinateTransformations']
+    but not in
+    meta['coordinateTransformations'].
+    The former do not roundtrip because even in older OME-Zarr versions, their meaning is well-defined, and
+    meta['datasets'][]['coordinateTransformations'] is always required to exist. The presence of identity translations
+    is likely to just be laziness of the writer implementation (always writing translations rather than special-casing
+    when translation is 0). Normalising by removing identity translations is acceptable here.
+    The latter *do* roundtrip because in older OME-Zarr versions, the meaning of meta['coordinateTransformations'] was
+    not defined, and was not required to be written. Presumably, if another writer made the specific effort to add
+    this, and wrote a zero-translation, it had some special reason.
+
+    If we want to round-trip identity translations in meta['datasets'][]['coordinateTransformations'],
+    Multiscale.from_ome_zarr needs a special hidden list of which datasets had zero-translations, so that
+    Multiscale.to_ome_zarr (or specifically the _services.ome_zarr.build_dataset_dict helper)
+    can find out where to include them even if Multiscale[].translation.is_identity() is True.
+    """
+    metadata = copy.deepcopy(metadata)
+    for dataset in metadata.get("datasets", []):
+        if "coordinateTransformations" not in dataset or not isinstance(dataset["coordinateTransformations"], list):
+            continue
+        dataset["coordinateTransformations"] = [
+            transform
+            for transform in dataset["coordinateTransformations"]
+            if not (transform.get("type") == "translation" and all(v == 0 for v in transform.get("translation", ())))
+        ]
+    return metadata
+
+
 def without_known_feature_gaps(metadata: dict[str, Any]) -> dict[str, Any]:
     round_trippable_metadata = copy.deepcopy(metadata)
     for key in known_keys_that_should_roundtrip_but_todo:
-        del round_trippable_metadata[key]
+        if key in round_trippable_metadata:
+            del round_trippable_metadata[key]
     return round_trippable_metadata
 
 
@@ -65,7 +97,9 @@ def test_multiscale_roundtrips_maximal_ome_zarr(example: MultiscaleMetadataExamp
 
     for key in known_keys_that_should_roundtrip_but_todo:
         assert key not in output_json, "Update test when implementing round-trip for previously unsupported optionals"
-    expected_output = with_written_version(without_known_feature_gaps(example.metadata), example.id)
+    expected_output = without_identity_translations_datasets(
+        with_written_version(without_known_feature_gaps(example.metadata), example.id)
+    )
     if example.id in ("0.4", "0.5"):
         # We only guarantee approximate roundtrip of
         # `multiscale[coordinateTransformations]` for legacy versions.

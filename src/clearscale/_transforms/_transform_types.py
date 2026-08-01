@@ -173,10 +173,6 @@ class ScaleTransform(Transform):
         return len(self.scale), len(self.scale)
 
     @classmethod
-    def from_pixel_size(cls, pixel_size: PixelSize):
-        return cls(scale=tuple(pixel_size.values()))
-
-    @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "ScaleTransform":
         source, target = cls._parse_source_and_target(ome_dict)
         if "scale" in ome_dict:
@@ -193,6 +189,22 @@ class ScaleTransform(Transform):
             source=source,
             target=target,
         )
+
+    def __post_init__(self):
+        if not self.scale and self._ome_zarr_path is None:
+            raise ValueError("ScaleTransform requires either scale values or a path.")
+        if self.scale and self._ome_zarr_path is not None:
+            raise ValueError("ScaleTransform requires exactly one of scale values or a path.")
+        if self.scale:
+            scale = _require_numbers(self.scale, "scale")
+            object.__setattr__(self, "scale", scale)
+        elif not isinstance(self._ome_zarr_path, str) or not self._ome_zarr_path:
+            raise ValueError(f"ScaleTransform requires a non-empty path. Received: {self._ome_zarr_path!r}")
+        Transform.__post_init__(self)
+
+    @classmethod
+    def from_pixel_size(cls, pixel_size: PixelSize):
+        return cls(scale=tuple(pixel_size.values()))
 
     def to_pixel_size(self, axes: Iterable[AxisKey]) -> PixelSize:
         if not self.scale:
@@ -252,10 +264,6 @@ class TranslationTransform(Transform):
         return len(self.translation), len(self.translation)
 
     @classmethod
-    def from_translation(cls, translation: Translation):
-        return cls(translation=tuple(translation.values()))
-
-    @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "TranslationTransform":
         source, target = cls._parse_source_and_target(ome_dict)
         if "translation" in ome_dict:
@@ -272,6 +280,22 @@ class TranslationTransform(Transform):
             source=source,
             target=target,
         )
+
+    def __post_init__(self):
+        if not self.translation and self._ome_zarr_path is None:
+            raise ValueError("TranslationTransform requires either translation values or a path.")
+        if self.translation and self._ome_zarr_path is not None:
+            raise ValueError("TranslationTransform requires exactly one of translation values or a path.")
+        if self.translation:
+            translation = _require_numbers(self.translation, "translation")
+            object.__setattr__(self, "translation", translation)
+        elif not isinstance(self._ome_zarr_path, str) or not self._ome_zarr_path:
+            raise ValueError(f"TranslationTransform requires a non-empty path. Received: {self._ome_zarr_path!r}")
+        Transform.__post_init__(self)
+
+    @classmethod
+    def from_translation(cls, translation: Translation):
+        return cls(translation=tuple(translation.values()))
 
     def to_translation(self, axes: Iterable[AxisKey]) -> Translation:
         if not self.translation:
