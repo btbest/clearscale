@@ -126,6 +126,7 @@ OME_ZARR_MAX_MS_0_3 = {
 }
 OME_ZARR_MAX_MS_0_4 = {
     "version": "0.4",
+    "name": "example",
     "axes": ALL_CANONICAL_AXES,
     "datasets": [
         {
@@ -150,6 +151,35 @@ OME_ZARR_MAX_MS_0_4 = {
     "type": "gaussian",
     "metadata": SCALING_METHOD_EXAMPLE,
     "omero": OMERO_EXAMPLE,
+}
+OME_ZARR_MAX_MS_0_4_IDENTITY_TRANSLATION = {
+    "name": "input.zarr",
+    "type": "sample",
+    "version": "0.4",
+    "axes": [
+        {"type": "space", "name": "y", "unit": "nanometer"},
+        {"type": "space", "name": "x", "unit": "nanometer"},
+    ],
+    "datasets": [
+        {
+            "path": "s0",
+            "coordinateTransformations": [
+                {"scale": [0.2, 0.2], "type": "scale"},
+                {"translation": [0.0, 0.0], "type": "translation"},
+            ],
+        },
+        {
+            "path": "s1",
+            "coordinateTransformations": [
+                {"scale": [1.4, 1.4], "type": "scale"},
+                {"translation": [7.62, 8.49], "type": "translation"},
+            ],
+        },
+    ],
+    "coordinateTransformations": [
+        {"scale": [1.0, 1.0], "type": "scale"},
+        {"translation": [0.0, 0.0], "type": "translation"},
+    ],
 }
 OME_ZARR_MAX_MS_0_5 = {key: value for key, value in OME_ZARR_MAX_MS_0_4.items() if key != "version"}
 OME_ZARR_MAX_MS_0_6_RC0 = {
@@ -240,6 +270,7 @@ _MAXIMAL_MULTISCALE_EXAMPLES = (
     MultiscaleMetadataExample("0.2", OME_ZARR_MAX_MS_0_2, ndim=5),
     MultiscaleMetadataExample("0.3", OME_ZARR_MAX_MS_0_3, ndim=5),
     MultiscaleMetadataExample("0.4", OME_ZARR_MAX_MS_0_4, ndim=5),
+    MultiscaleMetadataExample("0.4", OME_ZARR_MAX_MS_0_4_IDENTITY_TRANSLATION, ndim=2),
     MultiscaleMetadataExample("0.5", OME_ZARR_MAX_MS_0_5, ndim=5),
     MultiscaleMetadataExample("0.6.rc0", OME_ZARR_MAX_MS_0_6_RC0, ndim=5),
 )

@@ -9,6 +9,7 @@ from typing import Union, Dict, List, Any, Optional, Tuple, Protocol, Iterable, 
 from clearscale._axis_values import ShapeLike, Translation, PixelSize, AxisKey
 from clearscale._transforms import (
     TransformSequence,
+    IdentityTransform,
     ScaleTransform,
     TranslationTransform,
     TransformGraph,
@@ -203,8 +204,14 @@ class MultiscaleTransforms(TransformSequence):
         assert isinstance(scale_product, ScaleTransform), "scales can always compose"
         if earlier.translation_transform is not None and self.translation_transform is not None:
             translation_sum = self.translation_transform.composed_with(earlier.translation_transform)
-            assert isinstance(translation_sum, TranslationTransform), "translations can always compose"
-            transforms: Tuple[Transform, ...] = (scale_product, translation_sum)
+            if isinstance(translation_sum, IdentityTransform):
+                transforms: Tuple[Transform, ...] = (
+                    scale_product,
+                    TranslationTransform(translation=(0.0 for _ in self.translation_transform.translation)),
+                )
+            else:
+                assert isinstance(translation_sum, TranslationTransform), "translations can always compose"
+                transforms = (scale_product, translation_sum)
         elif earlier.translation_transform is not None:
             transforms = (scale_product, earlier.translation_transform)
         elif self.translation_transform is not None:
