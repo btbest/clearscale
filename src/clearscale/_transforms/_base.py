@@ -339,7 +339,32 @@ class Transform(ABC):
     @abstractmethod
     def inverted(self) -> "Transform": ...
     @abstractmethod
-    def composed_with(self, earlier: "Transform") -> Optional["Transform"]: ...
+    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
+        """Return one transform equivalent to applying `earlier` and then `self`.
+
+        Composition preserves the most specific transform type that can represent the
+        result without inspecting whether its payload happens to be an identity or a
+        special case of another type. For example, composing two scale transforms
+        returns a scale transform, including when their factors multiply to one.
+
+        Return `None` when the transforms cannot be represented by one transform,
+        their payload values are unavailable, or their dimensions or bound endpoints
+        do not chain. Use `simplified` separately when a canonical, less general
+        representation is wanted.
+        """
+        ...
+
+    @abstractmethod
+    def simplified(self) -> "Transform":
+        """Return the simplest supported representation of this transform's payload.
+
+        Inspect `self` (recursively for container transforms) and return another transform type,
+        such as identity for a unit scale or a scale/translation sequence for an affine that can be
+        decomposed as such.
+        Return `self` when no simpler representation is available or payload values are unavailable.
+        """
+        ...
+
     @abstractmethod
     def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
         """Source and target dimensionality implied by this transform's payload.
@@ -593,8 +618,8 @@ class Transform(ABC):
             )
 
     def _endpoints_can_chain_after(self, earlier: "Transform") -> bool:
-        if earlier.target is None or self.source is None or earlier.target == self.source:
-            return True
+        if earlier.target is not None and self.source is not None:
+            return earlier.target == self.source
         self_ndim = self._ndim_by_payload()
         earlier_ndim = earlier._ndim_by_payload()
         if self_ndim is None or earlier_ndim is None:
@@ -636,6 +661,23 @@ class TransformSequence(Transform):
                 target=target,
             )
         return replace(self, transforms=(earlier,) + self.transforms, source=source, target=target)
+
+    def simplified(self) -> "Transform":
+        from ._transform_types import IdentityTransform
+
+        # TODO (in a followup commit - keep moving separate from editing): Either move this to _transform_types or move Identity here
+        simplified_flattened: List[Transform] = []
+        for t in self.transforms:
+            simplified = t.simplified()
+            if isinstance(simplified, TransformSequence):
+                simplified_flattened.extend(simplified)
+            elif not isinstance(simplified, IdentityTransform):
+                simplified_flattened.append(simplified)
+        if not simplified_flattened:
+            return IdentityTransform(source=self.source, target=self.target)
+        if len(simplified_flattened) == 1:
+            return simplified_flattened[0].bound(source=self.source, target=self.target)
+        return replace(self, transforms=tuple(simplified_flattened)).bound(source=self.source, target=self.target)
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         return {
@@ -706,6 +748,13 @@ class TransformSequence(Transform):
         return replace(self, source=source, target=target, transforms=new_transforms)
 
     def collapsed(self, *, raise_uncollapsed: bool = False) -> "Transform | TransformSequence":
+        """
+        Reduce the sequence's length by composing the contained transforms.
+        Returns the shortest sequence that is semantically identical.
+        Returns a single Transform if the entire sequence can be composed.
+        Raises ValueError if raise_uncollapsed and the sequence cannot be composed into a single Transform.
+        The returned transform(s) may be more 'complex' types (e.g. [Scale, Translation] -> Affine).
+        """
         result: List[Transform] = [self.transforms[0]]
 
         for current in self.transforms[1:]:
@@ -721,6 +770,14 @@ class TransformSequence(Transform):
         if len(result) == 1:
             return result[0]
         return replace(self, transforms=tuple(result))
+
+    def canonicalized(self) -> "Transform":
+        """Reduce the sequence to its canonical representation, meaning the 'simplest' sequence
+        that is semantically equivalent.
+        In particular, this removes Identity, and other transform types if their values effectively
+        encode an identity, and decomposes AffineTransforms into sequences of ProjectAxis, MapAxis,
+        Rotation, Scale, and Translation depending on its values."""
+        return self.collapsed().simplified()
 
     def _validate_child_ndim_chain(self) -> None:
         earlier_target_ndim: Optional[int] = None

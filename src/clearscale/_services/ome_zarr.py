@@ -312,20 +312,11 @@ class MultiscaleTransforms(TransformSequence):
         if not self._endpoints_can_chain_after(earlier):
             return None
         scale_product = self.scale_transform.composed_with(earlier.scale_transform)
-        if isinstance(scale_product, IdentityTransform):
-            scale_product = ScaleTransform(scale=tuple(1.0 for _ in self.scale_transform.scale))
-        else:
-            assert isinstance(scale_product, ScaleTransform), "scales can always compose"
+        assert isinstance(scale_product, ScaleTransform), "scales can always compose"
         if earlier.translation_transform is not None and self.translation_transform is not None:
             translation_sum = self.translation_transform.composed_with(earlier.translation_transform)
-            if isinstance(translation_sum, IdentityTransform):
-                transforms: Tuple[Transform, ...] = (
-                    scale_product,
-                    TranslationTransform(translation=tuple(0.0 for _ in self.translation_transform.translation)),
-                )
-            else:
-                assert isinstance(translation_sum, TranslationTransform), "translations can always compose"
-                transforms = (scale_product, translation_sum)
+            assert isinstance(translation_sum, TranslationTransform), "translations can always compose"
+            transforms = (scale_product, translation_sum)
         elif earlier.translation_transform is not None:
             transforms = (scale_product, earlier.translation_transform)
         elif self.translation_transform is not None:

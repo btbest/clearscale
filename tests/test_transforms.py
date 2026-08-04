@@ -25,6 +25,7 @@ from clearscale._transforms import (
     NodeRef,
     FileRef,
 )
+from clearscale._transforms._transform_types import IDENTITY_TOLERANCE
 
 
 def test_transform_name_round_trips():
@@ -123,6 +124,222 @@ def test_resolving_transform_revalidates_endpoint_axes():
         transform.with_resolved({"tile_0": multiscale})
 
 
+def test_scale_composed_with_identity():
+    earlier_t = IdentityTransform()
+    later_t = ScaleTransform(scale=(5, 7, 11))
+
+    composed = later_t.composed_with(earlier_t)
+    assert isinstance(composed, ScaleTransform)
+    assert composed == later_t
+
+
+def test_scale_composed_with_scale():
+    earlier_t = ScaleTransform(scale=(2, 3, 4))
+    later_t = ScaleTransform(scale=(5, 7, 11))
+
+    composed = later_t.composed_with(earlier_t)
+    assert isinstance(composed, ScaleTransform)
+    assert composed == ScaleTransform(scale=(10, 21, 44))
+
+
+def test_scale_composed_with_translation():
+    earlier_t = TranslationTransform(translation=(5, 7))
+    later_t = ScaleTransform(scale=(2, 3))
+
+    composed = later_t.composed_with(earlier_t)
+    assert isinstance(composed, AffineTransform)
+    assert composed == AffineTransform(affine=((2, 0, 10), (0, 3, 21)))
+
+
+def test_scale_composed_with_rotation():
+    earlier_t = RotationTransform(rotation=((0, -1), (1, 0)))
+    later_t = ScaleTransform(scale=(2, 3))
+
+    composed = later_t.composed_with(earlier_t)
+    assert isinstance(composed, AffineTransform)
+    assert composed == AffineTransform(affine=((0, -2, 0), (3, 0, 0)))
+
+
+@pytest.mark.parametrize(
+    "map_axis,scale,expected",
+    [
+        pytest.param((1, 0), (2, 3), ((0, 2, 0), (3, 0, 0)), id="2d swap"),
+        pytest.param((2, 0, 1), (2, 3, 5), ((0, 0, 2, 0), (3, 0, 0, 0), (0, 5, 0, 0)), id="3d cycle"),
+        pytest.param((0, 2, 1), (2, 3, 5), ((2, 0, 0, 0), (0, 0, 3, 0), (0, 5, 0, 0)), id="3d swap"),
+    ],
+)
+def test_scale_composed_with_map_axis(map_axis, scale, expected):
+    earlier_t = MapAxisTransform(map_axis=map_axis)
+    later_t = ScaleTransform(scale=scale)
+
+    composed = later_t.composed_with(earlier_t)
+    assert isinstance(composed, AffineTransform)
+    assert composed == AffineTransform(affine=expected)
+
+
+@pytest.mark.parametrize(
+    "drops,inserts,scale,expected",
+    [
+        pytest.param((), (), (2, 3), ((2, 0, 0), (0, 3, 0)), id="noop"),
+        pytest.param((1,), (), (2, 3), ((2, 0, 0, 0), (0, 0, 3, 0)), id="drop"),
+        pytest.param((), (0,), (2, 3, 5), ((0, 0, 0), (3, 0, 0), (0, 5, 0)), id="insert"),
+        pytest.param((1,), (0,), (2, 3, 5), ((0, 0, 0, 0), (3, 0, 0, 0), (0, 0, 5, 0)), id="drop and insert"),
+    ],
+)
+def test_scale_composed_with_project_axis(drops, inserts, scale, expected):
+    earlier_t = ProjectAxisTransform(drops=drops, inserts=inserts)
+    later_t = ScaleTransform(scale=scale)
+
+    composed = later_t.composed_with(earlier_t)
+
+    assert composed == AffineTransform(affine=expected)
+
+
+@pytest.mark.parametrize(
+    "earlier,later",
+    [
+        pytest.param(
+            ScaleTransform(scale=(), _ome_zarr_path="foo"), ScaleTransform(scale=(2,)), id="earlier unloaded scale"
+        ),
+        pytest.param(
+            ScaleTransform(scale=(2,)), ScaleTransform(scale=(), _ome_zarr_path="foo"), id="later unloaded scale"
+        ),
+        pytest.param(
+            TranslationTransform(translation=(), _ome_zarr_path="foo"),
+            ScaleTransform(scale=(2,)),
+            id="earlier unloaded translation",
+        ),
+        pytest.param(
+            RotationTransform(_ome_zarr_path="foo"), ScaleTransform(scale=(2,)), id="earlier unloaded rotation"
+        ),
+        pytest.param(ScaleTransform(scale=(2, 3)), ScaleTransform(scale=(5,)), id="scale ndim mismatch"),
+        pytest.param(
+            TranslationTransform(translation=(2, 3)), ScaleTransform(scale=(5,)), id="translation ndim mismatch"
+        ),
+        pytest.param(
+            RotationTransform(rotation=((1, 0), (0, 1))), ScaleTransform(scale=(5,)), id="rotation ndim mismatch"
+        ),
+        pytest.param(
+            CoordinatesTransform(path="coords.zarr"), ScaleTransform(scale=(2,)), id="some other transform type"
+        ),
+    ],
+)
+def test_scale_composed_with_rejects_unsupported_or_invalid(earlier: Transform, later: Transform):
+    assert later.composed_with(earlier) is None
+
+
+def test_scale_simplified_within_tolerance_identity():
+    transform = ScaleTransform(scale=(1, 1 + IDENTITY_TOLERANCE / 2, 1 - IDENTITY_TOLERANCE / 2))
+    simplified = transform.simplified()
+    assert simplified == IdentityTransform()
+
+
+@pytest.mark.parametrize(
+    "scale",
+    [
+        pytest.param((1 + IDENTITY_TOLERANCE * 2,), id="outside tolerance above"),
+        pytest.param((1 - IDENTITY_TOLERANCE * 2,), id="outside tolerance below"),
+        pytest.param((1, 2), id="one identity one nonidentity"),
+    ],
+)
+def test_scale_simplified_keeps_nonidentity(scale):
+    transform = ScaleTransform(scale=scale)
+    simplified = transform.simplified()
+    assert simplified is transform
+
+
+def test_translation_composed_with_translation():
+    earlier_t = TranslationTransform(translation=(2, 3, 5))
+    later_t = TranslationTransform(translation=(7, 11, 13))
+
+    composed = later_t.composed_with(earlier_t)
+    assert isinstance(composed, TranslationTransform)
+    assert composed == TranslationTransform(translation=(9, 14, 18))
+
+
+def test_translation_composed_with_scale():
+    earlier_t = ScaleTransform(scale=(2, 3))
+    later_t = TranslationTransform(translation=(5, 7))
+
+    composed = later_t.composed_with(earlier_t)
+    assert isinstance(composed, AffineTransform)
+    assert composed == AffineTransform(affine=((2, 0, 5), (0, 3, 7)))
+
+
+def test_translation_composed_with_rotation():
+    earlier_t = RotationTransform(rotation=((0, -1), (1, 0)))
+    later_t = TranslationTransform(translation=(3, 5))
+
+    composed = later_t.composed_with(earlier_t)
+    assert isinstance(composed, AffineTransform)
+    assert composed == AffineTransform(affine=((0, -1, 3), (1, 0, 5)))
+
+
+@pytest.mark.parametrize(
+    "earlier,later",
+    [
+        pytest.param(
+            TranslationTransform(translation=(), _ome_zarr_path="foo"),
+            TranslationTransform(translation=(2,)),
+            id="earlier unloaded translation",
+        ),
+        pytest.param(
+            TranslationTransform(translation=(2,)),
+            TranslationTransform(translation=(), _ome_zarr_path="foo"),
+            id="later unloaded translation",
+        ),
+        pytest.param(
+            ScaleTransform(scale=(), _ome_zarr_path="foo"),
+            TranslationTransform(translation=(2,)),
+            id="earlier unloaded scale",
+        ),
+        pytest.param(
+            RotationTransform(_ome_zarr_path="foo"),
+            TranslationTransform(translation=(2,)),
+            id="earlier unloaded rotation",
+        ),
+        pytest.param(
+            TranslationTransform(translation=(2, 3)),
+            TranslationTransform(translation=(5,)),
+            id="translation ndim mismatch",
+        ),
+        pytest.param(ScaleTransform(scale=(2, 3)), TranslationTransform(translation=(5,)), id="scale ndim mismatch"),
+        pytest.param(
+            RotationTransform(rotation=((1, 0), (0, 1))),
+            TranslationTransform(translation=(5,)),
+            id="rotation ndim mismatch",
+        ),
+        pytest.param(
+            CoordinatesTransform(path="coords.zarr"),
+            TranslationTransform(translation=(2,)),
+            id="some other transform type",
+        ),
+    ],
+)
+def test_translation_composed_with_rejects_unsupported_or_invalid(earlier: Transform, later: Transform):
+    assert later.composed_with(earlier) is None
+
+
+def test_translation_simplified_within_tolerance_identity():
+    transform = TranslationTransform(translation=(0, IDENTITY_TOLERANCE / 2, IDENTITY_TOLERANCE / -2))
+    simplified = transform.simplified()
+    assert simplified == IdentityTransform()
+
+
+@pytest.mark.parametrize(
+    "translation",
+    [
+        pytest.param((IDENTITY_TOLERANCE * 2,), id="outside tolerance above"),
+        pytest.param((IDENTITY_TOLERANCE * -2,), id="outside tolerance below"),
+        pytest.param((0, -1), id="one identity one nonidentity"),
+    ],
+)
+def test_translation_simplified_keeps_nonidentity(translation):
+    transform = TranslationTransform(translation=translation)
+    simplified = transform.simplified()
+    assert simplified is transform
+
+
 def test_path_backed_rotation_round_trips_and_no_ndim():
     rotation = Transform.from_ome_zarr({"type": "rotation", "path": "coordinateTransformations/rotation"})
     assert isinstance(rotation, RotationTransform)
@@ -215,22 +432,23 @@ def test_rotation_inverts_matrix(rotation, inverse):
         ),
     ],
 )
-def test_rotation_composition(earlier, later, expected):
+def test_rotation_composed_with_rotation(earlier, later, expected):
     composed = RotationTransform(rotation=later).composed_with(RotationTransform(rotation=earlier))
 
     assert cast(RotationTransform, composed).rotation == expected
 
 
 @pytest.mark.parametrize(
-    "earlier",
+    "earlier, expected",
     [
-        ScaleTransform(scale=(2, 2)),
-        TranslationTransform((1, 2)),
-        AffineTransform(((1, 0, 0), (0, 1, 0))),
+        (ScaleTransform(scale=(2, 3)), ((0, -3, 0), (2, 0, 0))),
+        (TranslationTransform((1, 2)), ((0, -1, -2), (1, 0, 1))),
+        (AffineTransform(((2, 0, 3), (0, 4, 5))), ((0, -4, -5), (2, 0, 3))),
     ],
 )
-def test_rotation_only_composes_with_rotation(earlier):
-    assert RotationTransform(((1, 0), (0, 1))).composed_with(earlier) is None
+def test_rotation_composed_with_other_affine_representable_transforms(earlier, expected):
+    composed = RotationTransform(((0, -1), (1, 0))).composed_with(earlier)
+    assert isinstance(composed, AffineTransform)
 
 
 def test_path_backed_affine_round_trips_and_no_ndim():
@@ -422,13 +640,13 @@ def test_affine_composed_with_rejects_mismatching_dims(earlier, later):
         ),
     ],
 )
-def test_affine_composed_with_simplifies(earlier, later, expected):
+def test_affine_composed_with_preserves_affine_and_simplified_returns_special_case(earlier, later, expected):
     earlier_t = AffineTransform(affine=earlier)
     later_t = AffineTransform(affine=later)
     composed = later_t.composed_with(earlier_t)
 
-    assert isinstance(composed, type(expected))
-    assert composed == expected
+    assert isinstance(composed, AffineTransform)
+    assert composed.simplified() == expected
 
 
 @pytest.mark.parametrize(
@@ -458,6 +676,77 @@ def test_affine_composed_with_does_not_simplify_combinations(earlier, later, exp
     composed = cast(AffineTransform, AffineTransform(affine=later).composed_with(AffineTransform(affine=earlier)))
 
     assert composed.affine == expected
+
+
+@pytest.mark.parametrize(
+    "earlier,later,expected",
+    [
+        pytest.param(
+            MapAxisTransform((1, 0)),
+            AffineTransform(((2, 0, 5), (0, 3, 7))),
+            AffineTransform(((0, 2, 5), (3, 0, 7))),
+            id="map then affine",
+        ),
+        pytest.param(
+            AffineTransform(((2, 0, 5), (0, 3, 7))),
+            MapAxisTransform((1, 0)),
+            AffineTransform(((0, 3, 7), (2, 0, 5))),
+            id="affine then map",
+        ),
+        pytest.param(
+            ProjectAxisTransform(drops=(0, 2)),
+            AffineTransform(((2, 0, 5), (0, 3, 7))),
+            AffineTransform(((0, 2, 0, 0, 5), (0, 0, 0, 3, 7))),
+            id="project then affine",
+        ),
+        pytest.param(
+            AffineTransform(((2, 0, 0, 5), (0, 3, 0, 7), (0, 0, 5, 11))),
+            ProjectAxisTransform(drops=(1,)),
+            AffineTransform(((2, 0, 0, 5), (0, 0, 5, 11))),
+            id="affine then project",
+        ),
+    ],
+)
+def test_affine_map_and_project_axis_compose_in_both_directions(earlier: Transform, later: Transform, expected):
+    assert later.composed_with(earlier) == expected
+
+
+@pytest.mark.parametrize(
+    "affine,expected",
+    [
+        pytest.param(
+            ((2, 0, 3), (0, 5, 7)),
+            TransformSequence((ScaleTransform((2, 5)), TranslationTransform((3, 7)))),
+            id="scale and translation",
+        ),
+        pytest.param(
+            ((0, -1, 3), (1, 0, 7)),
+            TransformSequence((RotationTransform(((0, -1), (1, 0))), TranslationTransform((3, 7)))),
+            id="rotation and translation",
+        ),
+        pytest.param(
+            ((0, -2, 3), (5, 0, 7)),
+            TransformSequence(
+                (
+                    RotationTransform(((0, -1), (1, 0))),
+                    ScaleTransform((2, 5)),
+                    TranslationTransform((3, 7)),
+                )
+            ),
+            id="rotation scale and translation",
+        ),
+    ],
+)
+def test_affine_simplified_returns_semantic_sequence(affine, expected):
+    assert AffineTransform(affine).simplified() == expected
+
+
+def test_affine_simplified_keeps_shear_and_path_backed_payloads():
+    shear = AffineTransform(((1, 0.25, 0), (0, 1, 0)))
+    path_backed = AffineTransform(_ome_zarr_path="affine.zarr")
+
+    assert shear.simplified() is shear
+    assert path_backed.simplified() is path_backed
 
 
 def test_affines_with_dimension_mismatch_do_not_compose():
@@ -496,9 +785,13 @@ def test_affines_with_dimension_mismatch_do_not_compose():
         AffineTransform(affine=((2, 0, 3), (0, 4, 8))),
     ],
 )
-def test_affine_composed_with_inverse_simplifies_to_identity(transform):
-    assert isinstance(transform.inverted().composed_with(transform), IdentityTransform)
-    assert isinstance(transform.composed_with(transform.inverted()), IdentityTransform)
+def test_composed_with_inverse_preserves_type_and_simplified_returns_identity(transform):
+    left_inverse = transform.inverted().composed_with(transform)
+    right_inverse = transform.composed_with(transform.inverted())
+    assert isinstance(left_inverse, type(transform))
+    assert isinstance(right_inverse, type(transform))
+    assert isinstance(left_inverse.simplified(), IdentityTransform)
+    assert isinstance(right_inverse.simplified(), IdentityTransform)
 
 
 def test_coordinates_and_displacements_reject_non_strings():
@@ -631,6 +924,14 @@ def test_map_axis_composed(earlier, later, composed):
     later = MapAxisTransform(later)
 
     assert later.composed_with(earlier) == MapAxisTransform(composed)
+
+
+def test_map_axis_transform_simplified_returns_identity_only_for_noops():
+    assert MapAxisTransform((0, 1)).simplified() == IdentityTransform()
+    assert MapAxisTransform((1, 0)).simplified() == MapAxisTransform((1, 0))
+    assert ProjectAxisTransform().simplified() == IdentityTransform()
+    project = ProjectAxisTransform(drops=(0,))
+    assert project.simplified() is project
 
 
 def test_map_axis_rejects_missing_transpose():
@@ -777,6 +1078,59 @@ def test_bijection_composition_commutes_with_inversion():
     invert_then_compose = earlier.inverted().composed_with(later.inverted())
 
     assert compose_then_invert == invert_then_compose
+
+
+@pytest.mark.parametrize(
+    "forward,inverse",
+    [
+        pytest.param(ScaleTransform(scale=(1,)), TranslationTransform(translation=(0,)), id="scale and translation"),
+        pytest.param(
+            RotationTransform(rotation=((1, 0), (0, 1))), ScaleTransform(scale=(1, 1)), id="rotation and scale"
+        ),
+    ],
+)
+def test_bijection_simplified_detects_both_children_simplified(forward: Transform, inverse: Transform):
+    transform = BijectionTransform(forward=forward, inverse=inverse)
+    simplified = transform.simplified()
+    assert isinstance(simplified, IdentityTransform)
+
+
+@pytest.mark.parametrize(
+    "forward,inverse,expected",
+    [
+        pytest.param(
+            ScaleTransform(scale=(1,)),
+            TranslationTransform(translation=(3,)),
+            BijectionTransform(forward=IdentityTransform(), inverse=TranslationTransform(translation=(3,))),
+            id="forward only",
+        ),
+        pytest.param(
+            ScaleTransform(scale=(2,)),
+            TranslationTransform(translation=(0,)),
+            BijectionTransform(forward=ScaleTransform(scale=(2,)), inverse=IdentityTransform()),
+            id="inverse only",
+        ),
+    ],
+)
+def test_bijection_simplified_replaces_changed_children(forward: Transform, inverse: Transform, expected: Transform):
+    transform = BijectionTransform(forward=forward, inverse=inverse)
+    simplified = transform.simplified()
+    assert simplified == expected
+
+
+@pytest.mark.parametrize(
+    "forward,inverse",
+    [
+        pytest.param(ScaleTransform(scale=(2,)), TranslationTransform(translation=(3,)), id="scale and translation"),
+        pytest.param(
+            RotationTransform(rotation=((0, -1), (1, 0))), ScaleTransform(scale=(2, 3)), id="rotation and scale"
+        ),
+    ],
+)
+def test_bijection_simplified_detects_no_simplification(forward: Transform, inverse: Transform):
+    transform = BijectionTransform(forward=forward, inverse=inverse)
+    simplified = transform.simplified()
+    assert simplified is transform
 
 
 def test_bijection_rejects_mismatching_child_endpoint():
@@ -1006,15 +1360,15 @@ def test_by_dimension_composes_itemwise_when_matching():
         pytest.param(
             ByDimensionTransform(
                 transforms=(
-                    _ByDimensionChild((0,), (0,), ProjectAxisTransform(drops=(0,), inserts=(0,))),
+                    _ByDimensionChild((0,), (0,), CoordinatesTransform(path="foo.zarr")),
                     _ByDimensionChild((1,), (1,), IdentityTransform()),
                 ),
             ),
-            id="project axis does not compose with scale",
+            id="child cannot compose",
         ),
     ],
 )
-def test_by_dimension_fails_invalid_itemwise_composition(earlier):
+def test_by_dimension_fails_invalid_itemwise_composition(earlier: ByDimensionTransform):
     later = ByDimensionTransform(
         transforms=(
             _ByDimensionChild((0,), (0,), ScaleTransform((2.0,))),
@@ -1022,7 +1376,7 @@ def test_by_dimension_fails_invalid_itemwise_composition(earlier):
         ),
     )
 
-    assert later.composed_with(cast(ByDimensionTransform, earlier)) is None
+    assert later.composed_with(earlier) is None
 
 
 def test_by_dimension_fails_composition_of_project_target_into_non_identity():
@@ -1116,6 +1470,53 @@ def test_by_dimension_composes_after_project_axis(earlier, later, expected):
     later = cast(ByDimensionTransform, later)
     earlier = cast(ByDimensionTransform, earlier)
     assert later.composed_with(earlier) == expected
+
+
+def test_by_dimension_simplified_detects_all_subspaces_identity():
+    transform = ByDimensionTransform(
+        transforms=(
+            _ByDimensionChild(source_indices=(0,), target_indices=(0,), transform=ScaleTransform(scale=(1,))),
+            _ByDimensionChild(
+                source_indices=(1,), target_indices=(1,), transform=TranslationTransform(translation=(0,))
+            ),
+        )
+    )
+    simplified = transform.simplified()
+    assert isinstance(simplified, IdentityTransform)
+
+
+def test_by_dimension_simplified_replaces_changed_children():
+    transform = ByDimensionTransform(
+        transforms=(
+            _ByDimensionChild(source_indices=(0,), target_indices=(0,), transform=ScaleTransform(scale=(1,))),
+            _ByDimensionChild(
+                source_indices=(1,), target_indices=(1,), transform=TranslationTransform(translation=(3,))
+            ),
+        )
+    )
+    expected = ByDimensionTransform(
+        transforms=(
+            _ByDimensionChild(source_indices=(0,), target_indices=(0,), transform=IdentityTransform()),
+            _ByDimensionChild(
+                source_indices=(1,), target_indices=(1,), transform=TranslationTransform(translation=(3,))
+            ),
+        )
+    )
+    simplified = transform.simplified()
+    assert simplified == expected
+
+
+def test_by_dimension_simplified_detects_no_simplification():
+    transform = ByDimensionTransform(
+        transforms=(
+            _ByDimensionChild(source_indices=(0,), target_indices=(0,), transform=ScaleTransform(scale=(2,))),
+            _ByDimensionChild(
+                source_indices=(1,), target_indices=(1,), transform=TranslationTransform(translation=(3,))
+            ),
+        )
+    )
+    simplified = transform.simplified()
+    assert simplified is transform
 
 
 def test_transform_sequence_rejects_mismatched_axis_value_counts():
@@ -1212,6 +1613,55 @@ def test_collapsed_scale_sequence_preserves_bound_endpoints():
     assert collapsed.source == source
     assert collapsed.target == target
     assert collapsed.scale == (10, 21)
+
+
+@pytest.mark.parametrize(
+    "transforms",
+    [
+        pytest.param(
+            (
+                IdentityTransform(),
+                ScaleTransform(scale=(2,)),
+                TranslationTransform(translation=(3,)),
+            ),
+            id="identity removed from front",
+        ),
+        pytest.param(
+            (
+                ScaleTransform(scale=(2,)),
+                TranslationTransform(translation=(3,)),
+                IdentityTransform(),
+            ),
+            id="identity removed from back",
+        ),
+        pytest.param(
+            (
+                IdentityTransform(),
+                ScaleTransform(scale=(2,)),
+                IdentityTransform(),
+            ),
+            id="single child remains",
+        ),
+    ],
+)
+def test_transform_sequence_simplified_maintains_sequence_endpoints_on_children(transforms):
+    source = _sys_ref("source", "x")
+    intermediate1 = _sys_ref("intermediate1", "x")
+    intermediate2 = _sys_ref("intermediate2", "x")
+    target = _sys_ref("target", "x")
+
+    bound_chain = []
+    refs = [source, intermediate1, intermediate2, target]
+    for i, transform in enumerate(transforms):
+        bound_chain.append(transform.bound(source=refs[i], target=refs[i + 1]))
+
+    simplified = TransformSequence(tuple(bound_chain), source=source, target=target).simplified()
+
+    assert simplified.source is source
+    assert simplified.target is target
+    if isinstance(simplified, TransformSequence):
+        assert simplified.transforms[0].source is source
+        assert simplified.transforms[-1].target is target
 
 
 def test_transform_graph_rejects_unbound_transforms():

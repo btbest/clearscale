@@ -1,3 +1,4 @@
+from abc import ABC, abstractmethod
 from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, field, replace
 import numbers
@@ -10,6 +11,8 @@ from typing import (
     Any,
     List,
     TypeGuard,
+    Union,
+    TYPE_CHECKING,
 )
 
 from clearscale._axis_values import (
@@ -17,6 +20,7 @@ from clearscale._axis_values import (
     PixelSize,
     Translation,
 )
+from clearscale._errors import CannotConvertToAffineError
 from clearscale._services.matrices import (
     FloatMatrix,
     FloatVector,
@@ -32,6 +36,9 @@ from clearscale._services.matrices import (
     DETERMINANT_SINGULARITY_TOLERANCE,
 )
 from clearscale._transforms._base import NodeRef, RelativePath, Transform
+
+if TYPE_CHECKING:
+    from ._base import TransformSequence
 
 IDENTITY_TOLERANCE = 1e-13
 
@@ -106,7 +113,47 @@ def _validate_unique(values: Tuple[int, ...], field_name: str) -> None:
 
 
 @dataclass(frozen=True, slots=True)
+class AffineRepresentableTransform(Transform, ABC):
+    """Mixin-ish for transforms that can also be represented by an affine matrix, to deduplicate composed_with logic"""
+
+    @abstractmethod
+    def _to_affine_transform(
+        self, *, source_ndim: Optional[int] = None, target_ndim: Optional[int] = None
+    ) -> "AffineTransform":
+        """Return an AffineTransform equivalent to this transform.
+
+        source_ndim and target_ndim are special affordances for ProjectAxisTransform, because it can be
+        represented as an AffineTransform, and we want it to be composable, but its payload
+        specifies only an ndim *difference*, so it can't derive the exact matrix shape just from itself.
+        IdentityTransform has the same issue (source==target by definition, but no payload to know either ndim from),
+        but as a noop it has other special treatments. Better not to pollute it with AffineRepresentable.
+        """
+        ...
+
+    def _compose_via_affine(self, earlier: Transform) -> Optional["AffineTransform"]:
+        """Compose two affine-representable transforms using their matrix forms."""
+        if not isinstance(earlier, AffineRepresentableTransform):
+            return None
+        # For most types this is just a sanity guard;
+        # for ProjectAxis x ProjectAxis, the lack of ndim info makes composition via affine impossible
+        assert not isinstance(earlier, type(self)), "must not be called for same-type composition"
+        try:
+            self_ndim = self._ndim_by_payload()
+            earlier_ndim = earlier._ndim_by_payload()
+            later_affine = self._to_affine_transform(source_ndim=earlier_ndim[1] if earlier_ndim is not None else None)
+            later_ndim = later_affine._ndim_by_payload()
+            assert later_ndim is not None
+            earlier_affine = earlier._to_affine_transform(target_ndim=later_ndim[0])
+            composed = later_affine.composed_with(earlier_affine)
+            return composed if isinstance(composed, AffineTransform) else None
+        except CannotConvertToAffineError:
+            return None
+
+
+@dataclass(frozen=True, slots=True)
 class IdentityTransform(Transform):
+    # Note (to be deleted): Identity is actually not representable as affine
+    # because it has no payload, so it does not know its ndim...
     @property
     def is_invertible(self) -> bool:
         return True
@@ -119,6 +166,9 @@ class IdentityTransform(Transform):
             return None
         return replace(earlier, source=self._composed_source(earlier), target=self._composed_target(earlier))
 
+    def simplified(self) -> "IdentityTransform":
+        return self
+
     def _ndim_by_payload(self) -> None:
         return None
 
@@ -127,7 +177,7 @@ class IdentityTransform(Transform):
 
 
 @dataclass(frozen=True, slots=True)
-class ScaleTransform(Transform):
+class ScaleTransform(AffineRepresentableTransform):
     scale: Tuple[float, ...]  # Can be empty if _ome_zarr_path is provided instead
     _ome_zarr_path: Optional[str] = None
     """OME-Zarr allows scale with path to a zarr instead of plain values.
@@ -145,23 +195,45 @@ class ScaleTransform(Transform):
         scale_inverted = tuple(1 / v for v in self.scale)
         return replace(self, scale=scale_inverted, _ome_zarr_path=None, source=self.target, target=self.source)
 
-    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
-        if not isinstance(earlier, ScaleTransform):
-            return None
-        if not self.scale or not earlier.scale:
+    def _to_affine_transform(
+        self, *, source_ndim: Optional[int] = None, target_ndim: Optional[int] = None
+    ) -> "AffineTransform":
+        if not self.scale:
+            raise CannotConvertToAffineError(self)
+        affine = tuple(
+            tuple(self.scale[row] if row == col else 0.0 for col in range(len(self.scale))) + (0.0,)
+            for row in range(len(self.scale))
+        )
+        return AffineTransform(affine=affine, source=self.source, target=self.target)
+
+    def composed_with(self, earlier: "Transform") -> Union["ScaleTransform", "AffineTransform", None]:
+        if not self.scale:
             return None
         if not self._endpoints_can_chain_after(earlier):
             return None
-        product_scale = tuple(a * b for a, b in zip(self.scale, earlier.scale))
-        if all(abs(p - 1) <= IDENTITY_TOLERANCE for p in product_scale):
-            return IdentityTransform(source=self._composed_source(earlier), target=self._composed_target(earlier))
-        return replace(
-            self,
-            scale=product_scale,
-            source=self._composed_source(earlier),
-            target=self._composed_target(earlier),
-            _ome_zarr_path=None,
-        )
+        composed_source = self._composed_source(earlier)
+        composed_target = self._composed_target(earlier)
+
+        if isinstance(earlier, IdentityTransform):
+            return replace(self, source=composed_source, target=composed_target)
+
+        if isinstance(earlier, ScaleTransform):
+            if not earlier.scale:
+                return None
+            return replace(
+                self,
+                scale=tuple(a * b for a, b in zip(self.scale, earlier.scale)),
+                source=composed_source,
+                target=composed_target,
+                _ome_zarr_path=None,
+            )
+
+        return self._compose_via_affine(earlier)
+
+    def simplified(self) -> Union["ScaleTransform", "IdentityTransform"]:
+        if self.scale and all(abs(p - 1) <= IDENTITY_TOLERANCE for p in self.scale):
+            return IdentityTransform(source=self.source, target=self.target)
+        return self
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         payload_dict = {"path": self._ome_zarr_path} if self._ome_zarr_path else {"scale": list(self.scale)}
@@ -218,7 +290,7 @@ class ScaleTransform(Transform):
 
 
 @dataclass(frozen=True, slots=True)
-class TranslationTransform(Transform):
+class TranslationTransform(AffineRepresentableTransform):
     translation: Tuple[float, ...]  # Can be empty if _ome_zarr_path is provided instead
     _ome_zarr_path: Optional[str] = None
     """OME-Zarr allows translation with path to a zarr instead of plain values.
@@ -238,23 +310,45 @@ class TranslationTransform(Transform):
             self, translation=translation_inverted, _ome_zarr_path=None, source=self.target, target=self.source
         )
 
-    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
-        if not isinstance(earlier, TranslationTransform):
-            return None
-        if not self.translation or not earlier.translation:
+    def _to_affine_transform(
+        self, *, source_ndim: Optional[int] = None, target_ndim: Optional[int] = None
+    ) -> "AffineTransform":
+        if not self.translation:
+            raise CannotConvertToAffineError(self)
+        affine = tuple(
+            tuple(1.0 if row == col else 0.0 for col in range(len(self.translation))) + (self.translation[row],)
+            for row in range(len(self.translation))
+        )
+        return AffineTransform(affine=affine, source=self.source, target=self.target)
+
+    def composed_with(self, earlier: "Transform") -> Union["TranslationTransform", "AffineTransform", None]:
+        if not self.translation:
             return None
         if not self._endpoints_can_chain_after(earlier):
             return None
-        sum_translation = tuple(a + b for a, b in zip(self.translation, earlier.translation))
-        if all(s <= IDENTITY_TOLERANCE for s in sum_translation):
-            return IdentityTransform(source=self._composed_source(earlier), target=self._composed_target(earlier))
-        return replace(
-            self,
-            translation=sum_translation,
-            source=self._composed_source(earlier),
-            target=self._composed_target(earlier),
-            _ome_zarr_path=None,
-        )
+        composed_source = self._composed_source(earlier)
+        composed_target = self._composed_target(earlier)
+
+        if isinstance(earlier, IdentityTransform):
+            return replace(self, source=composed_source, target=composed_target)
+
+        if isinstance(earlier, TranslationTransform):
+            if not earlier.translation:
+                return None
+            return replace(
+                self,
+                translation=tuple(a + b for a, b in zip(self.translation, earlier.translation)),
+                source=composed_source,
+                target=composed_target,
+                _ome_zarr_path=None,
+            )
+
+        return self._compose_via_affine(earlier)
+
+    def simplified(self) -> Union["TranslationTransform", "IdentityTransform"]:
+        if self.translation and all(abs(s) <= IDENTITY_TOLERANCE for s in self.translation):
+            return IdentityTransform(source=self.source, target=self.target)
+        return self
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         payload_dict = {"path": self._ome_zarr_path} if self._ome_zarr_path else {"translation": list(self.translation)}
@@ -312,7 +406,7 @@ class TranslationTransform(Transform):
 
 
 @dataclass(frozen=True, slots=True)
-class RotationTransform(Transform):
+class RotationTransform(AffineRepresentableTransform):
     rotation: Optional[FloatMatrix] = None
     _ome_zarr_path: Optional[str] = None
 
@@ -331,23 +425,43 @@ class RotationTransform(Transform):
             target=self.source,
         )
 
-    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
-        if not isinstance(earlier, RotationTransform):
-            return None
-        if self.rotation is None or earlier.rotation is None:
+    def _to_affine_transform(
+        self, *, source_ndim: Optional[int] = None, target_ndim: Optional[int] = None
+    ) -> "AffineTransform":
+        if self.rotation is None:
+            raise CannotConvertToAffineError(self)
+        affine = tuple(row + (0.0,) for row in self.rotation)
+        return AffineTransform(affine=affine, source=self.source, target=self.target)
+
+    def composed_with(self, earlier: "Transform") -> Union["RotationTransform", "AffineTransform", None]:
+        if self.rotation is None:
             return None
         if not self._endpoints_can_chain_after(earlier):
             return None
-        composed_rotation = matrix_multiply(self.rotation, earlier.rotation)
-        if is_identity_matrix(composed_rotation, tolerance=IDENTITY_TOLERANCE):
-            return IdentityTransform(source=self._composed_source(earlier), target=self._composed_target(earlier))
-        return replace(
-            self,
-            rotation=composed_rotation,
-            _ome_zarr_path=None,
-            source=self._composed_source(earlier),
-            target=self._composed_target(earlier),
-        )
+        composed_source = self._composed_source(earlier)
+        composed_target = self._composed_target(earlier)
+
+        if isinstance(earlier, IdentityTransform):
+            return replace(self, source=composed_source, target=composed_target)
+
+        if isinstance(earlier, RotationTransform):
+            if earlier.rotation is None:
+                return None
+            composed_rotation = matrix_multiply(self.rotation, earlier.rotation)
+            return replace(
+                self,
+                rotation=composed_rotation,
+                _ome_zarr_path=None,
+                source=composed_source,
+                target=composed_target,
+            )
+
+        return self._compose_via_affine(earlier)
+
+    def simplified(self) -> Union["RotationTransform", "IdentityTransform"]:
+        if self.rotation and is_identity_matrix(self.rotation, tolerance=IDENTITY_TOLERANCE):
+            return IdentityTransform(source=self.source, target=self.target)
+        return self
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         if self._ome_zarr_path is not None:
@@ -397,7 +511,7 @@ class RotationTransform(Transform):
 
 
 @dataclass(frozen=True, slots=True)
-class AffineTransform(Transform):
+class AffineTransform(AffineRepresentableTransform):
     affine: Optional[FloatMatrix] = None
     _ome_zarr_path: Optional[str] = None
 
@@ -424,42 +538,40 @@ class AffineTransform(Transform):
             target=self.source,
         )
 
+    def _to_affine_transform(
+        self, *, source_ndim: Optional[int] = None, target_ndim: Optional[int] = None
+    ) -> "AffineTransform":
+        if self.affine is None:
+            raise CannotConvertToAffineError(self)
+        return self
+
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
-        if not isinstance(earlier, AffineTransform):
-            return None
-        self_ndim = self._ndim_by_payload()
-        earlier_ndim = earlier._ndim_by_payload()
-        if self_ndim is None or earlier_ndim is None or self_ndim[0] != earlier_ndim[1]:
+        if self.affine is None:
             return None
         if not self._endpoints_can_chain_after(earlier):
             return None
-        new_linear = matrix_multiply(self._linear(), earlier._linear())
+        if isinstance(earlier, IdentityTransform):
+            return replace(
+                self,
+                source=self._composed_source(earlier),
+                target=self._composed_target(earlier),
+            )
+        if not isinstance(earlier, AffineRepresentableTransform):
+            return None
+        self_ndim = self._ndim_by_payload()
+        assert self_ndim is not None
+        try:
+            earlier_affine = earlier._to_affine_transform(target_ndim=self_ndim[0])
+        except CannotConvertToAffineError:
+            return None
+        earlier_ndim = earlier_affine._ndim_by_payload()
+        if earlier_ndim is None or self_ndim[0] != earlier_ndim[1]:
+            return None
+        new_linear = matrix_multiply(self._linear(), earlier_affine._linear())
         new_t = tuple(
-            a + b for a, b in zip(matrix_vector_multiply(self._linear(), earlier._translation()), self._translation())
+            a + b
+            for a, b in zip(matrix_vector_multiply(self._linear(), earlier_affine._translation()), self._translation())
         )
-        new_rows, new_cols = matrix_shape(new_linear)
-        if new_rows == new_cols:
-            is_linear_identity = is_identity_matrix(new_linear, tolerance=IDENTITY_TOLERANCE)
-            is_translation_identity = all(abs(t) < IDENTITY_TOLERANCE for t in new_t)
-            if is_linear_identity and is_translation_identity:
-                return IdentityTransform(source=self._composed_source(earlier), target=self._composed_target(earlier))
-            elif is_linear_identity:
-                return TranslationTransform(
-                    translation=new_t, source=self._composed_source(earlier), target=self._composed_target(earlier)
-                )
-            elif is_translation_identity:
-                if is_diagonal_matrix(new_linear, tolerance=IDENTITY_TOLERANCE):
-                    return ScaleTransform(
-                        scale=tuple(new_linear[i][i] for i in range(len(new_linear))),
-                        source=self._composed_source(earlier),
-                        target=self._composed_target(earlier),
-                    )
-                if is_rotation_matrix(new_linear, tolerance=IDENTITY_TOLERANCE):
-                    return RotationTransform(
-                        rotation=new_linear,
-                        source=self._composed_source(earlier),
-                        target=self._composed_target(earlier),
-                    )
         affine = tuple(row + (new_t[i],) for i, row in enumerate(new_linear))
         return replace(
             self,
@@ -468,6 +580,80 @@ class AffineTransform(Transform):
             source=self._composed_source(earlier),
             target=self._composed_target(earlier),
         )
+
+    def simplified(
+        self,
+    ) -> Union[
+        "AffineTransform",
+        "TransformSequence",
+        "RotationTransform",
+        "ScaleTransform",
+        "TranslationTransform",
+        "IdentityTransform",
+    ]:
+        if self.affine is None:
+            return self
+        linear = self._linear()
+        translation = self._translation()
+        target_ndim, source_ndim = matrix_shape(linear)
+        if target_ndim == source_ndim:
+            is_linear_identity = is_identity_matrix(linear, tolerance=IDENTITY_TOLERANCE)
+            is_translation_identity = all(abs(t) <= IDENTITY_TOLERANCE for t in translation)
+            if is_linear_identity and is_translation_identity:
+                return IdentityTransform(source=self.source, target=self.target)
+            if is_linear_identity:
+                return TranslationTransform(translation=translation, source=self.source, target=self.target)
+            is_linear_scale_only = is_diagonal_matrix(linear, tolerance=IDENTITY_TOLERANCE)
+            if is_translation_identity:
+                if is_linear_scale_only:
+                    return ScaleTransform(
+                        scale=tuple(linear[i][i] for i in range(len(linear))),
+                        source=self.source,
+                        target=self.target,
+                    )
+                if is_rotation_matrix(linear, tolerance=IDENTITY_TOLERANCE):
+                    return RotationTransform(rotation=linear, source=self.source, target=self.target)
+            if is_linear_scale_only:
+                from ._base import TransformSequence
+
+                return TransformSequence(
+                    (
+                        ScaleTransform(scale=tuple(linear[i][i] for i in range(len(linear)))),
+                        TranslationTransform(translation=translation),
+                    ),
+                    source=self.source,
+                    target=self.target,
+                )
+            if is_rotation_matrix(linear, tolerance=IDENTITY_TOLERANCE):
+                from ._base import TransformSequence
+
+                return TransformSequence(
+                    (
+                        RotationTransform(rotation=linear),
+                        TranslationTransform(translation=translation),
+                    ),
+                    source=self.source,
+                    target=self.target,
+                )
+            scale = [sum(value * value for value in row) ** 0.5 for row in linear]
+            if all(abs(value) > IDENTITY_TOLERANCE for value in scale):
+                rotation = tuple(tuple(value / scale[i] for value in row) for i, row in enumerate(linear))
+                if matrix_determinant(rotation) < 0:
+                    scale[0] *= -1
+                    rotation = (tuple(-value for value in rotation[0]),) + rotation[1:]
+                if is_rotation_matrix(rotation, tolerance=IDENTITY_TOLERANCE):
+                    from ._base import TransformSequence
+
+                    return TransformSequence(
+                        (
+                            RotationTransform(rotation=rotation),
+                            ScaleTransform(scale=tuple(scale)),
+                            TranslationTransform(translation=translation),
+                        ),
+                        source=self.source,
+                        target=self.target,
+                    ).simplified()
+        return self
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         if self._ome_zarr_path is not None:
@@ -541,6 +727,9 @@ class CoordinatesTransform(Transform):
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
         return None
 
+    def simplified(self) -> "CoordinatesTransform":
+        return self
+
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         result: Dict[str, Any] = {"type": "coordinates", "path": self.path}
         if self.interpolation is not None:
@@ -603,6 +792,9 @@ class DisplacementsTransform(Transform):
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
         return None
 
+    def simplified(self) -> "DisplacementsTransform":
+        return self
+
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         result: Dict[str, Any] = {"type": "displacements", "path": self.path}
         if self.interpolation is not None:
@@ -645,7 +837,7 @@ class DisplacementsTransform(Transform):
 
 
 @dataclass(frozen=True, slots=True)
-class MapAxisTransform(Transform):
+class MapAxisTransform(AffineRepresentableTransform):
     """MapAxisTransform represents a pure transposition (no drops or inserts)"""
 
     map_axis: Tuple[int, ...]
@@ -661,17 +853,37 @@ class MapAxisTransform(Transform):
             inverted_map[input_index] = output_index
         return replace(self, map_axis=tuple(inverted_map), source=self.target, target=self.source)
 
+    def _to_affine_transform(
+        self, *, source_ndim: Optional[int] = None, target_ndim: Optional[int] = None
+    ) -> "AffineTransform":
+        affine = tuple(
+            tuple(1.0 if source_axis == mapped_source else 0.0 for source_axis in range(len(self.map_axis))) + (0.0,)
+            for mapped_source in self.map_axis
+        )
+        return AffineTransform(affine=affine, source=self.source, target=self.target)
+
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
-        if not isinstance(earlier, MapAxisTransform):
-            return None
         if not self._endpoints_can_chain_after(earlier):
             return None
-        return replace(
-            self,
-            map_axis=tuple(earlier.map_axis[i] for i in self.map_axis),
-            source=self._composed_source(earlier),
-            target=self._composed_target(earlier),
-        )
+        if isinstance(earlier, IdentityTransform):
+            return replace(
+                self,
+                source=self._composed_source(earlier),
+                target=self._composed_target(earlier),
+            )
+        if isinstance(earlier, MapAxisTransform):
+            return replace(
+                self,
+                map_axis=tuple(earlier.map_axis[i] for i in self.map_axis),
+                source=self._composed_source(earlier),
+                target=self._composed_target(earlier),
+            )
+        return self._compose_via_affine(earlier)
+
+    def simplified(self) -> Union["MapAxisTransform", "IdentityTransform"]:
+        if self.map_axis == tuple(range(len(self.map_axis))):
+            return IdentityTransform(source=self.source, target=self.target)
+        return self
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         return {"type": "mapAxis", "mapAxis": list(self.map_axis)}
@@ -700,7 +912,7 @@ class MapAxisTransform(Transform):
 
 
 @dataclass(frozen=True, slots=True)
-class ProjectAxisTransform(Transform):
+class ProjectAxisTransform(AffineRepresentableTransform):
     """ProjectAxisTransform represents axis dropping and insertion"""
 
     drops: Tuple[int, ...] = field(default=())
@@ -720,16 +932,51 @@ class ProjectAxisTransform(Transform):
             raise ValueError(f"Axis dropping is not invertible. This transform drops axes {self.drops!r}.")
         return replace(self, drops=self.inserts, inserts=(), source=self.target, target=self.source)
 
+    def _to_affine_transform(
+        self, *, source_ndim: Optional[int] = None, target_ndim: Optional[int] = None
+    ) -> "AffineTransform":
+        # Drawing ndim from self.source/target endpoints is not appropriate here - this is an internal
+        # helper for .composed_with.
+        if source_ndim is None and target_ndim is not None:
+            source_ndim = target_ndim + len(self.drops) - len(self.inserts)
+        if target_ndim is None and source_ndim is not None:
+            target_ndim = source_ndim - len(self.drops) + len(self.inserts)
+        assert (
+            source_ndim is not None and target_ndim is not None
+        ), f"should never be called without ndim: {source_ndim!r}, {target_ndim!r}"
+        if source_ndim < 1 or target_ndim < 1:  # This might also be assert-level...
+            raise CannotConvertToAffineError(self)
+        # The two below are guarded by ndim validation when constructing a sequence. They could happen
+        # when directly calling `projectAxis.composed_with(other)` without validating ndim, but this is not public API.
+        assert target_ndim == source_ndim - len(self.drops) + len(
+            self.inserts
+        ), f"nonsense params: {source_ndim!r} != {target_ndim!r} - {len(self.drops)} + {len(self.inserts)}"
+        assert not any(index >= source_ndim for index in self.drops) and not any(
+            index >= target_ndim for index in self.inserts
+        ), f"ndim mismatch: some of {self.drops} are >= {source_ndim!r} or some {self.inserts} >= {target_ndim!r}"
+        retained_sources = iter(index for index in range(source_ndim) if index not in self.drops)
+        affine_rows = []
+        for target_axis in range(target_ndim):
+            source_axis = None if target_axis in self.inserts else next(retained_sources)
+            affine_rows.append(tuple(1.0 if source_axis == index else 0.0 for index in range(source_ndim)) + (0.0,))
+        return AffineTransform(affine=tuple(affine_rows), source=self.source, target=self.target)
+
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
         """
         Composing ProjectAxisTransform is done by projecting implicit earlier.source axis indices
         into the intermediate (earlier.target / self.source), then adding self's own drops/adds.
         None represents inserted axes (None because these have no corresponding source axis index).
         """
-        if not isinstance(earlier, ProjectAxisTransform):
-            return None
         if not self._endpoints_can_chain_after(earlier):
             return None
+        if isinstance(earlier, IdentityTransform):
+            return replace(
+                self,
+                source=self._composed_source(earlier),
+                target=self._composed_target(earlier),
+            )
+        if not isinstance(earlier, ProjectAxisTransform):
+            return self._compose_via_affine(earlier)
 
         highest_known_earlier_src_axis = max(earlier.drops, default=-1)
         intermediate_axes: List[Optional[int]] = [
@@ -771,6 +1018,11 @@ class ProjectAxisTransform(Transform):
             source=self._composed_source(earlier),
             target=self._composed_target(earlier),
         )
+
+    def simplified(self) -> Union["ProjectAxisTransform", "IdentityTransform"]:
+        if not self.drops and not self.inserts:
+            return IdentityTransform(source=self.source, target=self.target)
+        return self
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         result: Dict[str, Any] = {"type": "projectAxis"}
@@ -891,6 +1143,15 @@ class BijectionTransform(Transform):
             source=self._composed_source(earlier),
             target=self._composed_target(earlier),
         )
+
+    def simplified(self) -> Union["BijectionTransform", "IdentityTransform"]:
+        forward = self.forward.simplified()
+        inverse = self.inverse.simplified()
+        if isinstance(forward, IdentityTransform) and isinstance(inverse, IdentityTransform):
+            return IdentityTransform(source=self.source, target=self.target)
+        if forward is self.forward and inverse is self.inverse:
+            return self
+        return replace(self, forward=forward, inverse=inverse)
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         return {
@@ -1191,6 +1452,18 @@ class ByDimensionTransform(Transform):
             )
 
         return None
+
+    def simplified(self) -> Union["ByDimensionTransform", "IdentityTransform"]:
+        """Simplify per subspace. If all subspaces are identities, unwrap the ByDimension."""
+        simplified_items = tuple(replace(item, transform=item.transform.simplified()) for item in self.transforms)
+        if all(
+            isinstance(item.transform, IdentityTransform) and item.source_indices == item.target_indices
+            for item in simplified_items
+        ):
+            return IdentityTransform(source=self.source, target=self.target)
+        if all(new.transform is old.transform for new, old in zip(simplified_items, self.transforms)):
+            return self
+        return replace(self, transforms=simplified_items)
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         return {
