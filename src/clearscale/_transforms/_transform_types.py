@@ -12,7 +12,6 @@ from typing import (
     List,
     TypeGuard,
     Union,
-    TYPE_CHECKING,
 )
 
 from clearscale._axis_values import (
@@ -39,10 +38,7 @@ from clearscale._services.matrices import (
     zero_matrix_rows,
     DETERMINANT_SINGULARITY_TOLERANCE,
 )
-from clearscale._transforms._base import NodeRef, RelativePath, Transform
-
-if TYPE_CHECKING:
-    from ._base import TransformSequence
+from clearscale._transforms._base import IdentityTransform, NodeRef, RelativePath, Transform, TransformSequence
 
 IDENTITY_TOLERANCE = 1e-13
 
@@ -157,32 +153,6 @@ class AffineRepresentableTransform(Transform, ABC):
 AffineRepresentableSubtypes = Union[
     "ProjectAxisTransform", "MapAxisTransform", "RotationTransform", "ScaleTransform", "TranslationTransform"
 ]
-
-
-@dataclass(frozen=True, slots=True)
-class IdentityTransform(Transform):
-    # Note (to be deleted): Identity is actually not representable as affine
-    # because it has no payload, so it does not know its ndim...
-    @property
-    def is_invertible(self) -> bool:
-        return True
-
-    def inverted(self) -> "IdentityTransform":
-        return replace(self, source=self.target, target=self.source)
-
-    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
-        if not self._endpoints_can_chain_after(earlier):
-            return None
-        return replace(earlier, source=self._composed_source(earlier), target=self._composed_target(earlier))
-
-    def simplified(self) -> "IdentityTransform":
-        return self
-
-    def _ndim_by_payload(self) -> None:
-        return None
-
-    def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
-        return {"type": "identity"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -665,8 +635,6 @@ class AffineTransform(AffineRepresentableTransform):
             return IdentityTransform(source=self.source, target=self.target)
         if len(components) == 1:
             return components[0].bound(source=self.source, target=self.target)
-        from ._base import TransformSequence
-
         return TransformSequence(tuple(components)).bound(source=self.source, target=self.target)
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:

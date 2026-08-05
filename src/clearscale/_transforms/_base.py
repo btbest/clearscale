@@ -498,8 +498,6 @@ class Transform(ABC):
         t_type = ome_dict.get("type")
         if t_type == "identity":
             source, target = cls._parse_source_and_target(ome_dict)
-            from clearscale._transforms._transform_types import IdentityTransform
-
             return IdentityTransform(_ome_zarr_name=cls._parse_name(ome_dict), source=source, target=target)
         elif t_type == "scale":
             from clearscale._transforms._transform_types import ScaleTransform
@@ -636,6 +634,32 @@ class Transform(ABC):
 
 
 @dataclass(frozen=True, slots=True)
+class IdentityTransform(Transform):
+    # Note (to be deleted): Identity is actually not representable as affine
+    # because it has no payload, so it does not know its ndim...
+    @property
+    def is_invertible(self) -> bool:
+        return True
+
+    def inverted(self) -> "IdentityTransform":
+        return replace(self, source=self.target, target=self.source)
+
+    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
+        if not self._endpoints_can_chain_after(earlier):
+            return None
+        return replace(earlier, source=self._composed_source(earlier), target=self._composed_target(earlier))
+
+    def simplified(self) -> "IdentityTransform":
+        return self
+
+    def _ndim_by_payload(self) -> None:
+        return None
+
+    def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
+        return {"type": "identity"}
+
+
+@dataclass(frozen=True, slots=True)
 class TransformSequence(Transform):
     transforms: Tuple[Transform, ...] = field(default=())
 
@@ -663,9 +687,6 @@ class TransformSequence(Transform):
         return replace(self, transforms=(earlier,) + self.transforms, source=source, target=target)
 
     def simplified(self) -> "Transform":
-        from ._transform_types import IdentityTransform
-
-        # TODO (in a followup commit - keep moving separate from editing): Either move this to _transform_types or move Identity here
         simplified_flattened: List[Transform] = []
         for t in self.transforms:
             simplified = t.simplified()
