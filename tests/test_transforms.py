@@ -1,5 +1,5 @@
 import re
-from typing import cast
+from typing import cast, Tuple
 
 import pytest
 
@@ -915,16 +915,34 @@ def test_affines_with_dimension_mismatch_do_not_compose():
                 (0, 1, 0, 0),
             )
         ),
+        MapAxisTransform(map_axis=(3, 0, 2, 1)),
         AffineTransform(affine=((2, 0, 3), (0, 4, 8))),
     ],
 )
 def test_composed_with_inverse_preserves_type_and_simplified_returns_identity(transform):
-    left_inverse = transform.inverted().composed_with(transform)
-    right_inverse = transform.composed_with(transform.inverted())
-    assert isinstance(left_inverse, type(transform))
-    assert isinstance(right_inverse, type(transform))
-    assert isinstance(left_inverse.simplified(), IdentityTransform)
-    assert isinstance(right_inverse.simplified(), IdentityTransform)
+    compose_inverse_with_self = transform.inverted().composed_with(transform)
+    compose_self_with_inverse = transform.composed_with(transform.inverted())
+    assert isinstance(compose_inverse_with_self, type(transform))
+    assert isinstance(compose_self_with_inverse, type(transform))
+    assert isinstance(compose_inverse_with_self.simplified(), IdentityTransform)
+    assert isinstance(compose_self_with_inverse.simplified(), IdentityTransform)
+
+
+def test_project_inverse_composes_with_self_to_identity():
+    # ProjectAxis does not symmetrically invert and compose like the other transforms in the test above,
+    # because it is non-invertible in one direction.
+    project = ProjectAxisTransform(inserts=(0, 3))
+
+    # Inserting some axes, then dropping them, is overall a noop
+    insert_then_drop = project.inverted().composed_with(project)
+    assert isinstance(insert_then_drop, ProjectAxisTransform)
+    assert insert_then_drop == ProjectAxisTransform(drops=(), inserts=())
+    assert isinstance(insert_then_drop.simplified(), IdentityTransform)
+
+    # Dropping some axes, then inserting new ones in the same index, destroys information
+    drop_then_insert = project.composed_with(project.inverted())
+    assert isinstance(drop_then_insert, ProjectAxisTransform)
+    assert drop_then_insert.simplified() == ProjectAxisTransform(drops=(0, 3), inserts=(0, 3))
 
 
 def test_coordinates_and_displacements_reject_non_strings():
@@ -1085,6 +1103,25 @@ def test_project_axis_matches_differing_endpoint_ndim():
     target = _sys_ref("target", "ij")
 
     _ = ProjectAxisTransform(drops=(0,), source=source, target=target)
+
+
+@pytest.mark.parametrize(
+    "given_inserts",
+    [(), (0,), (1,), (1, 3, 7)],
+)
+def test_project_axis_inverted(given_inserts: Tuple[int, ...]):
+    project = ProjectAxisTransform(inserts=given_inserts)
+    assert project.is_invertible
+    inverse = project.inverted()
+    assert isinstance(inverse, ProjectAxisTransform)
+    assert inverse.drops == project.inserts
+
+
+def test_project_axis_with_drops_is_not_invertible():
+    project = ProjectAxisTransform(drops=(0,))
+    assert not project.is_invertible
+    with pytest.raises(ValueError, match="Axis dropping is not invertible"):
+        _ = project.inverted()
 
 
 @pytest.mark.parametrize(
