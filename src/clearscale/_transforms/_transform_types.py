@@ -650,8 +650,15 @@ class AffineTransform(AffineRepresentableTransform):
         else:
             linear_components = self._decompose_square_linear(linear)
             if linear_components is None:
-                return self
-            components.extend(linear_components)
+                square_projection = self._decompose_square_projection(linear)
+                if square_projection is None:
+                    return self
+                drop, reduced_linear, insert = square_projection
+                components.append(drop)
+                components.extend(self._decompose_square_linear_else_affine(reduced_linear))
+                components.append(insert)
+            else:
+                components.extend(linear_components)
         if not all(abs(value) <= IDENTITY_TOLERANCE for value in translation):
             components.append(TranslationTransform(translation=translation))
         if not components:
@@ -747,6 +754,35 @@ class AffineTransform(AffineRepresentableTransform):
             for row in range(target_ndim)
         )
         return ProjectAxisTransform(drops=drops, inserts=inserts), post_project_linear
+
+    @staticmethod
+    def _decompose_square_projection(
+        linear: FloatMatrix,
+    ) -> Optional[Tuple["ProjectAxisTransform", FloatMatrix, "ProjectAxisTransform"]]:
+        """Factor a square rank-reducing matrix as drop, reduced linear, then insert.
+
+        Zero columns identify source axes that do not contribute and zero rows identify
+        target axes created with value zero. Equal drop and insert indices are left to
+        the zero-scale policy instead of being reinterpreted as axis projection.
+        """
+        rows, cols = matrix_shape(linear)
+        assert rows == cols, "shouldn't call this with a non-square matrix"
+        drops = zero_matrix_columns(linear, tolerance=IDENTITY_TOLERANCE)
+        inserts = zero_matrix_rows(linear, tolerance=IDENTITY_TOLERANCE)
+        if not drops or not inserts or drops == inserts:
+            return None
+        retained_sources = tuple(i for i in range(cols) if i not in drops)
+        retained_targets = tuple(i for i in range(rows) if i not in inserts)
+        if len(retained_sources) != len(retained_targets):
+            # This means the intermediate (i.e. drops -> intermediate -> inserts) would be non-square.
+            # There is no unambiguous decomposition at this point.
+            return None
+        reduced_linear = tuple(tuple(linear[row][col] for col in retained_sources) for row in retained_targets)
+        return (
+            ProjectAxisTransform(drops=drops),
+            reduced_linear,
+            ProjectAxisTransform(inserts=inserts),
+        )
 
     @staticmethod
     def _decompose_square_linear(linear: FloatMatrix) -> Optional[Tuple[AffineRepresentableSubtypes, ...]]:

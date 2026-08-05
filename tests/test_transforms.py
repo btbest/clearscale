@@ -729,7 +729,7 @@ def test_affine_map_and_project_axis_compose_in_both_directions(earlier: Transfo
 
 
 @pytest.mark.parametrize(
-    "affine,expected",
+    "affine,expected_simplified",
     [
         pytest.param(
             ((2, 0, 3), (0, 5, 7)),
@@ -836,34 +836,50 @@ def test_affine_map_and_project_axis_compose_in_both_directions(earlier: Transfo
             ),
             id="dimensionality expansion then general affine",
         ),
+        pytest.param(
+            ((0, 0, 0, 10), (2, 0, 0, 20), (0, 0, 3, 30)),
+            TransformSequence(
+                (
+                    ProjectAxisTransform(drops=(1,)),
+                    ScaleTransform((2, 3)),
+                    ProjectAxisTransform(inserts=(0,)),
+                    TranslationTransform((10, 20, 30)),
+                )
+            ),
+            id="square drop scale insert and translation",
+        ),
     ],
 )
-def test_affine_simplified_decomposes_sequence_and_collapsed_roundtrips(affine, expected):
+def test_affine_simplified_decomposes_sequence_and_collapsed_roundtrips(affine, expected_simplified):
     simplified = AffineTransform(affine).simplified()
-    assert simplified == expected
+    assert simplified == expected_simplified
 
-    recomposed = expected.collapsed(raise_uncollapsed=True)
+    recomposed = expected_simplified.collapsed(raise_uncollapsed=True)
     assert isinstance(recomposed, AffineTransform)
     assert recomposed.affine is not None
     for actual_row, expected_row in zip(recomposed.affine, affine):
         assert actual_row == pytest.approx(expected_row)
 
 
-def test_affine_simplified_keeps_shear_zero_scale_and_path_backed_payloads():
+@pytest.mark.parametrize(
+    "affine",
+    [
+        pytest.param(AffineTransform(((1, 0.25, 0), (0, 1, 0))), id="shear"),
+        pytest.param(AffineTransform(((1, 0, 0), (0, 0, 0))), id="zero scale is_diagonal true"),
+        pytest.param(AffineTransform(((1, 1, 0), (0, 0, 0))), id="zero scale is_diagonal false"),
+        pytest.param(AffineTransform(_ome_zarr_path="affine.zarr"), id="path-backed scale"),
+        pytest.param(AffineTransform(((0, 0, 1, 0), (0, 0, 0, 0), (0, 0, 2, 0))), id="square but drops != inserts"),
+    ],
+)
+def test_affine_simplified_keeps_shear_zero_scale_and_path_backed_payloads(affine: AffineTransform):
     """
-    Shears have no OME-Zarr representation.
-    Zero-scale treatment is subject to debate/change; they are technically allowed ('SHOULD be non-zero').
-    Collapsing an axis to singleton by zero-scale is exclusive to Affine for now.
+    - Shears have no OME-Zarr representation.
+    - Zero-scale treatment is subject to debate/change; they are technically allowed ('SHOULD be non-zero').
+    - Collapsing axes (effectively dropping) is in general reserved for ProjectAxis and is not
+      simplified/decomposed out of Affines. Except for the special case where the Affine's linear
+      component is square, but it encodes an equal number of drops and inserts.
     """
-    shear = AffineTransform(((1, 0.25, 0), (0, 1, 0)))
-    zero_scale_is_diagonal_true = AffineTransform(((1, 0, 0), (0, 0, 0)))
-    zero_scale_is_diagonal_false = AffineTransform(((0, 1, 0), (0, 0, 0)))
-    path_backed = AffineTransform(_ome_zarr_path="affine.zarr")
-
-    assert shear.simplified() is shear
-    assert zero_scale_is_diagonal_true.simplified() is zero_scale_is_diagonal_true
-    assert zero_scale_is_diagonal_false.simplified() is zero_scale_is_diagonal_false
-    assert path_backed.simplified() is path_backed
+    assert affine.simplified() is affine
 
 
 def test_affines_with_dimension_mismatch_do_not_compose():
