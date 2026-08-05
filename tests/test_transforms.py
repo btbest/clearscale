@@ -248,6 +248,11 @@ def test_scale_simplified_keeps_nonidentity(scale):
     assert simplified is transform
 
 
+def test_scale_zero_does_not_roundtrip_through_affine():
+    zero_scale = ScaleTransform((0,))
+    assert zero_scale._to_affine_transform().simplified() == AffineTransform(((0, 0),))
+
+
 def test_translation_composed_with_translation():
     earlier_t = TranslationTransform(translation=(2, 3, 5))
     later_t = TranslationTransform(translation=(7, 11, 13))
@@ -638,6 +643,18 @@ def test_affine_composed_with_rejects_mismatching_dims(earlier, later):
             RotationTransform(((0, -1), (1, 0))),
             id="translation composes to identity + rotation",
         ),
+        pytest.param(
+            ((1, 0, 0, 0), (0, 0, 1, 0)),
+            ((1, 0, 0), (0, 1, 0)),
+            ProjectAxisTransform(drops=(1,)),
+            id="project axis",
+        ),
+        pytest.param(
+            ((0, 1, 0), (1, 0, 0)),
+            ((1, 0, 0), (0, 1, 0)),
+            MapAxisTransform((1, 0)),
+            id="map axis",
+        ),
     ],
 )
 def test_affine_composed_with_preserves_affine_and_simplified_returns_special_case(earlier, later, expected):
@@ -725,6 +742,18 @@ def test_affine_map_and_project_axis_compose_in_both_directions(earlier: Transfo
             id="rotation and translation",
         ),
         pytest.param(
+            ((-1, 0, 2), (0, -1, 0)),
+            TransformSequence((ScaleTransform((-1, -1)), TranslationTransform((2, 0)))),
+            id="reflection-scale and translation",
+        ),
+        pytest.param(
+            ((0, -1, 3), (-1, 0, 7)),
+            TransformSequence(
+                (RotationTransform(((0, 1), (-1, 0))), ScaleTransform((-1, 1)), TranslationTransform((3, 7)))
+            ),
+            id="rotation reflection and translation",
+        ),
+        pytest.param(
             ((0, -2, 3), (5, 0, 7)),
             TransformSequence(
                 (
@@ -735,17 +764,105 @@ def test_affine_map_and_project_axis_compose_in_both_directions(earlier: Transfo
             ),
             id="rotation scale and translation",
         ),
+        pytest.param(
+            ((0, 1, 3), (1, 0, 7)),
+            TransformSequence((MapAxisTransform((1, 0)), TranslationTransform((3, 7)))),
+            id="map and translation",
+        ),
+        pytest.param(
+            ((0, 2, 3), (5, 0, 7)),
+            TransformSequence((MapAxisTransform((1, 0)), ScaleTransform((2, 5)), TranslationTransform((3, 7)))),
+            id="map scale and translation",
+        ),
+        pytest.param(
+            ((1, 0, 0, 3), (0, 0, 1, 7)),
+            TransformSequence((ProjectAxisTransform(drops=(1,)), TranslationTransform((3, 7)))),
+            id="project and translation",
+        ),
+        pytest.param(
+            ((0, 0, 2, 3), (5, 0, 0, 7)),
+            TransformSequence(
+                (
+                    ProjectAxisTransform(drops=(1,)),
+                    MapAxisTransform((1, 0)),
+                    ScaleTransform((2, 5)),
+                    TranslationTransform((3, 7)),
+                )
+            ),
+            id="project map scale and translation",
+        ),
+        pytest.param(
+            ((3, 0, -4, 3), (4, 0, 3, 7)),
+            TransformSequence(
+                (
+                    ProjectAxisTransform(drops=(1,)),
+                    RotationTransform(((0.6, -0.8), (0.8, 0.6))),
+                    ScaleTransform((5, 5)),
+                    TranslationTransform((3, 7)),
+                )
+            ),
+            id="project rotation scale and translation",
+        ),
+        pytest.param(
+            ((0, 0, 2), (3, 0, 3), (0, 5, 7)),
+            TransformSequence(
+                (
+                    ProjectAxisTransform(inserts=(0,)),
+                    ScaleTransform((1, 3, 5)),
+                    TranslationTransform((2, 3, 7)),
+                )
+            ),
+            id="insert scale and translation",
+        ),
+        pytest.param(
+            ((1, 1, 3),),
+            TransformSequence(
+                (
+                    AffineTransform(((1, 1, 0), (0, 1, 0))),
+                    ProjectAxisTransform(drops=(1,)),
+                    TranslationTransform((3,)),
+                )
+            ),
+            id="general affine then dimensionality reduction",
+        ),
+        pytest.param(
+            ((1, 3), (1, 7)),
+            TransformSequence(
+                (
+                    ProjectAxisTransform(inserts=(1,)),
+                    AffineTransform(((1, 0, 0), (1, 1, 0))),
+                    TranslationTransform((3, 7)),
+                )
+            ),
+            id="dimensionality expansion then general affine",
+        ),
     ],
 )
-def test_affine_simplified_returns_semantic_sequence(affine, expected):
-    assert AffineTransform(affine).simplified() == expected
+def test_affine_simplified_decomposes_sequence_and_collapsed_roundtrips(affine, expected):
+    simplified = AffineTransform(affine).simplified()
+    assert simplified == expected
+
+    recomposed = expected.collapsed(raise_uncollapsed=True)
+    assert isinstance(recomposed, AffineTransform)
+    assert recomposed.affine is not None
+    for actual_row, expected_row in zip(recomposed.affine, affine):
+        assert actual_row == pytest.approx(expected_row)
 
 
-def test_affine_simplified_keeps_shear_and_path_backed_payloads():
+def test_affine_simplified_keeps_shear_zero_scale_and_path_backed_payloads():
+    """
+    Shears have no OME-Zarr representation.
+    Zero-scale treatment is subject to debate/change; they are technically allowed ('SHOULD be non-zero').
+    Collapsing an axis to singleton by zero-scale is exclusive to Affine for now.
+    """
     shear = AffineTransform(((1, 0.25, 0), (0, 1, 0)))
+    zero_scale_is_diagonal_true = AffineTransform(((1, 0, 0), (0, 0, 0)))
+    zero_scale_is_diagonal_false = AffineTransform(((0, 1, 0), (0, 0, 0)))
     path_backed = AffineTransform(_ome_zarr_path="affine.zarr")
 
     assert shear.simplified() is shear
+    assert zero_scale_is_diagonal_true.simplified() is zero_scale_is_diagonal_true
+    assert zero_scale_is_diagonal_false.simplified() is zero_scale_is_diagonal_false
     assert path_backed.simplified() is path_backed
 
 

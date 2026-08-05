@@ -22,17 +22,21 @@ from clearscale._axis_values import (
 )
 from clearscale._errors import CannotConvertToAffineError
 from clearscale._services.matrices import (
+    AxisIndices,
     FloatMatrix,
     FloatVector,
     is_identity_matrix,
     is_diagonal_matrix,
     is_rotation_matrix,
+    monomial_matrix_decompose,
     matrix_shape,
     matrix_multiply,
     matrix_vector_multiply,
     matrix_transpose,
     matrix_invert,
     matrix_determinant,
+    zero_matrix_columns,
+    zero_matrix_rows,
     DETERMINANT_SINGULARITY_TOLERANCE,
 )
 from clearscale._transforms._base import NodeRef, RelativePath, Transform
@@ -107,7 +111,7 @@ def _covers_all_indices(values: Iterable[int]) -> bool:
     return set(values) == set(range(len(values)))
 
 
-def _validate_unique(values: Tuple[int, ...], field_name: str) -> None:
+def _validate_unique(values: AxisIndices, field_name: str) -> None:
     if len(set(values)) != len(values):
         raise ValueError(f"Invalid transform. Expected unique indices in {field_name}, received: {values!r}")
 
@@ -150,6 +154,11 @@ class AffineRepresentableTransform(Transform, ABC):
             return None
 
 
+AffineRepresentableSubtypes = Union[
+    "ProjectAxisTransform", "MapAxisTransform", "RotationTransform", "ScaleTransform", "TranslationTransform"
+]
+
+
 @dataclass(frozen=True, slots=True)
 class IdentityTransform(Transform):
     # Note (to be deleted): Identity is actually not representable as affine
@@ -178,6 +187,15 @@ class IdentityTransform(Transform):
 
 @dataclass(frozen=True, slots=True)
 class ScaleTransform(AffineRepresentableTransform):
+    """
+    ScaleTransform usually represents a simple scaling, i.e its values are positive.
+    E.g. ScaleTransform((2.0, 2.0)) downscales 2D by half.
+    Negative values can make the Scale effectively a reflection. Such Scales are only constructed through
+    AffineTransform.simplified within clearscale.
+    Zero-values can make the scale effectively axis-dropping (collapsing). clearscale never constructs such Scales.
+    ScaleTransforms imported from external can contain both zeros and negative values.
+    """
+
     scale: Tuple[float, ...]  # Can be empty if _ome_zarr_path is provided instead
     _ome_zarr_path: Optional[str] = None
     """OME-Zarr allows scale with path to a zarr instead of plain values.
@@ -187,7 +205,8 @@ class ScaleTransform(AffineRepresentableTransform):
 
     @property
     def is_invertible(self) -> bool:
-        return bool(self.scale) and all(v for v in self.scale)  # Not invertible with 0 values or unloaded values
+        """Scale is invertible unless its values are unloaded, or it scales any axis to 0"""
+        return bool(self.scale) and not AffineTransform._are_any_zeros(self.scale, tolerance=IDENTITY_TOLERANCE)
 
     def inverted(self) -> "ScaleTransform":
         if not self.is_invertible:
@@ -284,8 +303,11 @@ class ScaleTransform(AffineRepresentableTransform):
         axes = tuple(axes)
         if len(axes) != len(self.scale):
             raise ValueError(
-                f"Cannot derive PixelSize: expected {len(self.scale)} axes, received {len(axes)}: {list(axes)}"
+                f"Cannot derive PixelSize: Expected {len(self.scale)} axes, received {len(axes)}: {list(axes)}"
             )
+        if AffineTransform._are_any_zeros(self.scale, tolerance=IDENTITY_TOLERANCE):
+            # Zeros being present indicates this Scale does *not* represent a pixel size.
+            raise ValueError(f"Cannot derive PixelSize: Zero values detected in {self.scale!r}")
         return PixelSize(zip(axes, self.scale))
 
 
@@ -584,76 +606,61 @@ class AffineTransform(AffineRepresentableTransform):
     def simplified(
         self,
     ) -> Union[
-        "AffineTransform",
-        "TransformSequence",
-        "RotationTransform",
-        "ScaleTransform",
-        "TranslationTransform",
         "IdentityTransform",
+        AffineRepresentableSubtypes,
+        "TransformSequence",
+        "AffineTransform",
     ]:
+        """
+        Inspect the affine matrix and determine the simplest canonical representation.
+        For example:
+        - a single Identity
+        - a single simpler transform (ProjectAxis, MapAxis, Rotation, Scale, Translation)
+        - a Sequence of such simpler transforms
+        - for affines with source_ndim != target_ndim, the Sequence may contain a remainder Affine.
+        """
         if self.affine is None:
             return self
         linear = self._linear()
         translation = self._translation()
         target_ndim, source_ndim = matrix_shape(linear)
-        if target_ndim == source_ndim:
-            is_linear_identity = is_identity_matrix(linear, tolerance=IDENTITY_TOLERANCE)
-            is_translation_identity = all(abs(t) <= IDENTITY_TOLERANCE for t in translation)
-            if is_linear_identity and is_translation_identity:
-                return IdentityTransform(source=self.source, target=self.target)
-            if is_linear_identity:
-                return TranslationTransform(translation=translation, source=self.source, target=self.target)
-            is_linear_scale_only = is_diagonal_matrix(linear, tolerance=IDENTITY_TOLERANCE)
-            if is_translation_identity:
-                if is_linear_scale_only:
-                    return ScaleTransform(
-                        scale=tuple(linear[i][i] for i in range(len(linear))),
-                        source=self.source,
-                        target=self.target,
-                    )
-                if is_rotation_matrix(linear, tolerance=IDENTITY_TOLERANCE):
-                    return RotationTransform(rotation=linear, source=self.source, target=self.target)
-            if is_linear_scale_only:
-                from ._base import TransformSequence
-
-                return TransformSequence(
-                    (
-                        ScaleTransform(scale=tuple(linear[i][i] for i in range(len(linear)))),
-                        TranslationTransform(translation=translation),
-                    ),
-                    source=self.source,
-                    target=self.target,
+        components: List[Union[AffineRepresentableSubtypes, "AffineTransform"]] = []
+        has_project_component = target_ndim != source_ndim
+        if has_project_component:
+            projection_and_linear = self._decompose_project_axis(linear)
+            if projection_and_linear is not None:
+                project, post_project_linear = projection_and_linear
+                components.append(project)
+                components.extend(self._decompose_square_linear_else_affine(post_project_linear))
+            elif target_ndim > source_ndim:
+                inserts = tuple(range(source_ndim, target_ndim))
+                components.append(ProjectAxisTransform(inserts=inserts))
+                post_project_linear = tuple(
+                    row + tuple(1.0 if row_index == col else 0.0 for col in inserts)
+                    for row_index, row in enumerate(linear)
                 )
-            if is_rotation_matrix(linear, tolerance=IDENTITY_TOLERANCE):
-                from ._base import TransformSequence
-
-                return TransformSequence(
-                    (
-                        RotationTransform(rotation=linear),
-                        TranslationTransform(translation=translation),
-                    ),
-                    source=self.source,
-                    target=self.target,
+                components.extend(self._decompose_square_linear_else_affine(post_project_linear))
+            else:
+                pre_project_linear = linear + tuple(
+                    tuple(1.0 if row == col else 0.0 for col in range(source_ndim))
+                    for row in range(target_ndim, source_ndim)
                 )
-            scale = [sum(value * value for value in row) ** 0.5 for row in linear]
-            if all(abs(value) > IDENTITY_TOLERANCE for value in scale):
-                rotation = tuple(tuple(value / scale[i] for value in row) for i, row in enumerate(linear))
-                if matrix_determinant(rotation) < 0:
-                    scale[0] *= -1
-                    rotation = (tuple(-value for value in rotation[0]),) + rotation[1:]
-                if is_rotation_matrix(rotation, tolerance=IDENTITY_TOLERANCE):
-                    from ._base import TransformSequence
+                components.extend(self._decompose_square_linear_else_affine(pre_project_linear))
+                components.append(ProjectAxisTransform(drops=tuple(range(target_ndim, source_ndim))))
+        else:
+            linear_components = self._decompose_square_linear(linear)
+            if linear_components is None:
+                return self
+            components.extend(linear_components)
+        if not all(abs(value) <= IDENTITY_TOLERANCE for value in translation):
+            components.append(TranslationTransform(translation=translation))
+        if not components:
+            return IdentityTransform(source=self.source, target=self.target)
+        if len(components) == 1:
+            return components[0].bound(source=self.source, target=self.target)
+        from ._base import TransformSequence
 
-                    return TransformSequence(
-                        (
-                            RotationTransform(rotation=rotation),
-                            ScaleTransform(scale=tuple(scale)),
-                            TranslationTransform(translation=translation),
-                        ),
-                        source=self.source,
-                        target=self.target,
-                    ).simplified()
-        return self
+        return TransformSequence(tuple(components)).bound(source=self.source, target=self.target)
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         if self._ome_zarr_path is not None:
@@ -710,6 +717,104 @@ class AffineTransform(AffineRepresentableTransform):
     def _translation(self) -> FloatVector:
         assert self.affine, "Ensure `self.affine is not None` before calling"
         return tuple(row[-1] for row in self.affine)
+
+    @staticmethod
+    def _decompose_project_axis(linear: FloatMatrix) -> Optional[Tuple["ProjectAxisTransform", FloatMatrix]]:
+        target_ndim, source_ndim = matrix_shape(linear)
+        drops = zero_matrix_columns(linear, tolerance=IDENTITY_TOLERANCE)
+        inserts = zero_matrix_rows(linear, tolerance=IDENTITY_TOLERANCE)
+        retained_sources = tuple(i for i in range(source_ndim) if i not in drops)
+        retained_targets = tuple(i for i in range(target_ndim) if i not in inserts)
+        if len(retained_sources) != len(retained_targets):
+            return None
+        reduced = tuple(tuple(linear[row][col] for col in retained_sources) for row in retained_targets)
+        reduced_row_by_target = {target: row for row, target in enumerate(retained_targets)}
+        reduced_col_by_target = {target: col for col, target in enumerate(retained_targets)}
+        # Remaining square linear after factoring out the projection, with identity rows for inserts
+        post_project_linear = tuple(
+            tuple(
+                (
+                    1.0
+                    if row in inserts and row == col
+                    else (
+                        reduced[reduced_row_by_target[row]][reduced_col_by_target[col]]
+                        if row in reduced_row_by_target and col in reduced_col_by_target
+                        else 0.0
+                    )
+                )
+                for col in range(target_ndim)
+            )
+            for row in range(target_ndim)
+        )
+        return ProjectAxisTransform(drops=drops, inserts=inserts), post_project_linear
+
+    @staticmethod
+    def _decompose_square_linear(linear: FloatMatrix) -> Optional[Tuple[AffineRepresentableSubtypes, ...]]:
+        """Returns list of components if linear is decomposable into allowed specific types
+        (MapAxis, Rotation, Scale).
+        Empty list if identity.
+        Reflection may result in negative Scale, though Rotation is preferred over MapAxis + negative Scale.
+        None if shear is involved."""
+        rows, cols = matrix_shape(linear)
+        assert rows == cols, "shouldn't call this with non-square matrix, use _decompose_project_axis first"
+        if is_identity_matrix(linear, tolerance=IDENTITY_TOLERANCE):
+            return ()  # Like ((1, 0), (0, 1))
+        if is_diagonal_matrix(linear, tolerance=IDENTITY_TOLERANCE):
+            # Like ((-3, 0), (0, 2))
+            # Can also catch 180° rotations = horizontal reflections like ((-1, 0), (0, -1))
+            scale = tuple(linear[i][i] for i in range(rows))
+            if AffineTransform._are_any_zeros(scale, tolerance=IDENTITY_TOLERANCE):
+                return None
+            return (ScaleTransform(scale=scale),)
+        map_and_scale = monomial_matrix_decompose(linear, tolerance=IDENTITY_TOLERANCE)
+        if map_and_scale is not None and AffineTransform._are_all_positive(
+            map_and_scale[1], tolerance=IDENTITY_TOLERANCE
+        ):
+            # Like ((0, 0, 3), (0, 0, 2), (0, 0, 1))
+            # Exactly one positive non-zero per row/col -- mapaxis + non-reflection scale.
+            # Design choice: 90° and 270° rotations can also be expressed as mapaxis + neg. scale.
+            # We want them to instead be caught as RotationTransform.
+            map_axis = MapAxisTransform(map_axis=map_and_scale[0])
+            if not AffineTransform._is_scale_identity(map_and_scale[1], tolerance=IDENTITY_TOLERANCE):
+                return (map_axis, ScaleTransform(scale=map_and_scale[1]))
+            return (map_axis,)
+        # Like ((1, -2, 3), (0, 0, 0), (0, 0, 1))
+        # Arbitrary rotations, reflections, shears
+        scale = [sum(value * value for value in row) ** 0.5 for row in linear]
+        if AffineTransform._are_any_zeros(scale, tolerance=IDENTITY_TOLERANCE):
+            return None
+        rotation = tuple(tuple(value / scale[i] for value in row) for i, row in enumerate(linear))
+        if matrix_determinant(rotation) < 0:
+            # Absorb reflection into first scale and first rotation row
+            scale[0] *= -1
+            rotation = (tuple(-value for value in rotation[0]),) + rotation[1:]
+        if not is_rotation_matrix(rotation, tolerance=IDENTITY_TOLERANCE):
+            return None
+        t_rotation = RotationTransform(rotation=rotation)
+        if not AffineTransform._is_scale_identity(scale, tolerance=IDENTITY_TOLERANCE):
+            return (t_rotation, ScaleTransform(scale=tuple(scale)))
+        return (t_rotation,)
+
+    @classmethod
+    def _decompose_square_linear_else_affine(
+        cls, linear: FloatMatrix
+    ) -> Tuple[Union[AffineRepresentableSubtypes, "AffineTransform"], ...]:
+        components = cls._decompose_square_linear(linear)
+        if components is not None:
+            return components
+        return (AffineTransform(affine=tuple(row + (0.0,) for row in linear)),)
+
+    @staticmethod
+    def _are_any_zeros(numbers: Iterable[float], tolerance: float) -> bool:
+        return not all(abs(value) > tolerance for value in numbers)
+
+    @staticmethod
+    def _are_all_positive(numbers: Iterable[float], tolerance: float) -> bool:
+        return all(value > tolerance for value in numbers)
+
+    @staticmethod
+    def _is_scale_identity(scale: Iterable[float], tolerance: float) -> bool:
+        return all(abs(value - 1.0) <= tolerance for value in scale)
 
 
 @dataclass(frozen=True, slots=True)
@@ -840,7 +945,7 @@ class DisplacementsTransform(Transform):
 class MapAxisTransform(AffineRepresentableTransform):
     """MapAxisTransform represents a pure transposition (no drops or inserts)"""
 
-    map_axis: Tuple[int, ...]
+    map_axis: AxisIndices
 
     @property
     def is_invertible(self) -> bool:
@@ -915,10 +1020,10 @@ class MapAxisTransform(AffineRepresentableTransform):
 class ProjectAxisTransform(AffineRepresentableTransform):
     """ProjectAxisTransform represents axis dropping and insertion"""
 
-    drops: Tuple[int, ...] = field(default=())
+    drops: AxisIndices = field(default=())
     """Indices of source axes dropped.
     E.g. if source is 'xyz' and target is 'xz', the connecting ProjectAxisTransform has drops=(1,)"""
-    inserts: Tuple[int, ...] = field(default=())
+    inserts: AxisIndices = field(default=())
     """Indices of *target* axes that are new insertions.
     E.g. if source is 'yx' and target is 'cyx', the connecting ProjectAxisTransform has inserts=(0,)"""
 
@@ -1250,8 +1355,8 @@ class BijectionTransform(Transform):
 
 @dataclass(frozen=True, slots=True)
 class _ByDimensionChild:
-    source_indices: Tuple[int, ...]
-    target_indices: Tuple[int, ...]
+    source_indices: AxisIndices
+    target_indices: AxisIndices
     transform: Transform
 
     @classmethod
@@ -1391,7 +1496,7 @@ class ByDimensionTransform(Transform):
             items = []
             earlier_inserts_with_later_identity = []
 
-            def remap_source(axis: int, dropped: Tuple[int, ...], inserted: Tuple[int, ...]) -> int:
+            def remap_source(axis: int, dropped: AxisIndices, inserted: AxisIndices) -> int:
                 """Map an earlier.target axis back to the corresponding earlier.source axis.
                 Every axis dropped increments eq/subsequent indices by 1, every insert decrements"""
                 for d in dropped:
