@@ -83,7 +83,7 @@ def test_path_backed_scale_round_trips_and_no_ndim():
     scale = Transform.from_ome_zarr({"type": "scale", "path": "coordinateTransformations/scale"})
 
     assert isinstance(scale, ScaleTransform)
-    assert scale._ndim_by_payload() is None
+    assert scale._ndim_by_payload().delta == 0
     assert not scale.is_invertible
     assert scale.to_ome_zarr("0.6.rc0") == {"type": "scale", "path": "coordinateTransformations/scale"}
 
@@ -91,7 +91,7 @@ def test_path_backed_scale_round_trips_and_no_ndim():
 def test_path_backed_translation_round_trips_and_no_ndim():
     translation = Transform.from_ome_zarr({"type": "translation", "path": "coordinateTransformations/translation"})
     assert isinstance(translation, TranslationTransform)
-    assert translation._ndim_by_payload() is None
+    assert translation._ndim_by_payload().delta == 0
     assert not translation.is_invertible
     assert translation.to_ome_zarr("0.6.rc0") == {
         "type": "translation",
@@ -348,7 +348,7 @@ def test_translation_simplified_keeps_nonidentity(translation):
 def test_path_backed_rotation_round_trips_and_no_ndim():
     rotation = Transform.from_ome_zarr({"type": "rotation", "path": "coordinateTransformations/rotation"})
     assert isinstance(rotation, RotationTransform)
-    assert rotation._ndim_by_payload() is None
+    assert rotation._ndim_by_payload().delta == 0
     assert not rotation.is_invertible
     assert rotation.to_ome_zarr("0.6.rc0") == {
         "type": "rotation",
@@ -459,7 +459,7 @@ def test_rotation_composed_with_other_affine_representable_transforms(earlier, e
 def test_path_backed_affine_round_trips_and_no_ndim():
     affine = Transform.from_ome_zarr({"type": "affine", "path": "coordinateTransformations/affine"})
     assert isinstance(affine, AffineTransform)
-    assert affine._ndim_by_payload() is None
+    assert affine._ndim_by_payload().is_unconstrained()
     assert not affine.is_invertible
     assert affine.to_ome_zarr("0.6.rc0") == {
         "type": "affine",

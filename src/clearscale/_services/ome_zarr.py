@@ -270,8 +270,8 @@ class MultiscaleTransforms(TransformSequence):
         elif scale is None:
             assert isinstance(translation, TranslationTransform), "should've made sure by now"
             ndim = translation._ndim_by_payload()
-            assert ndim is not None, "should've made sure translation values actually exist"
-            scale = ScaleTransform(scale=tuple(1.0 for _ in range(ndim[0])))
+            assert ndim.source is not None, "should've made sure translation values actually exist"
+            scale = ScaleTransform(scale=tuple(1.0 for _ in range(ndim.source)))
         return cls(transforms=(scale,) if translation is None else (scale, translation))
 
     @classmethod

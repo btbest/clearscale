@@ -38,9 +38,26 @@ from clearscale._services.matrices import (
     zero_matrix_rows,
     DETERMINANT_SINGULARITY_TOLERANCE,
 )
-from clearscale._transforms._base import IdentityTransform, NodeRef, RelativePath, Transform, TransformSequence
+from clearscale._transforms._base import (
+    _EndpointDimensionConstraints,
+    IdentityTransform,
+    NodeRef,
+    RelativePath,
+    Transform,
+    TransformSequence,
+)
 
 IDENTITY_TOLERANCE = 1e-13
+
+
+def _max_optional(*values: Optional[int]) -> Optional[int]:
+    present = tuple(value for value in values if value is not None)
+    return max(present) if present else None
+
+
+def _min_optional(*values: Optional[int]) -> Optional[int]:
+    present = tuple(value for value in values if value is not None)
+    return min(present) if present else None
 
 
 def _is_number(value: Any) -> TypeGuard[numbers.Real]:
@@ -140,10 +157,10 @@ class AffineRepresentableTransform(Transform, ABC):
         try:
             self_ndim = self._ndim_by_payload()
             earlier_ndim = earlier._ndim_by_payload()
-            later_affine = self._to_affine_transform(source_ndim=earlier_ndim[1] if earlier_ndim is not None else None)
+            later_affine = self._to_affine_transform(source_ndim=earlier_ndim.target)
             later_ndim = later_affine._ndim_by_payload()
-            assert later_ndim is not None
-            earlier_affine = earlier._to_affine_transform(target_ndim=later_ndim[0])
+            assert later_ndim.source is not None, "_to_affine_transform should have failed in that case"
+            earlier_affine = earlier._to_affine_transform(target_ndim=later_ndim.source)
             composed = later_affine.composed_with(earlier_affine)
             return composed if isinstance(composed, AffineTransform) else None
         except CannotConvertToAffineError:
@@ -228,10 +245,10 @@ class ScaleTransform(AffineRepresentableTransform):
         payload_dict = {"path": self._ome_zarr_path} if self._ome_zarr_path else {"scale": list(self.scale)}
         return {"type": "scale", **payload_dict}
 
-    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+    def _ndim_by_payload(self) -> _EndpointDimensionConstraints:
         if not self.scale:
-            return None
-        return len(self.scale), len(self.scale)
+            return _EndpointDimensionConstraints(delta=0)
+        return _EndpointDimensionConstraints.exact(source=len(self.scale), target=len(self.scale))
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "ScaleTransform":
@@ -346,10 +363,10 @@ class TranslationTransform(AffineRepresentableTransform):
         payload_dict = {"path": self._ome_zarr_path} if self._ome_zarr_path else {"translation": list(self.translation)}
         return {"type": "translation", **payload_dict}
 
-    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+    def _ndim_by_payload(self) -> _EndpointDimensionConstraints:
         if not self.translation:
-            return None
-        return len(self.translation), len(self.translation)
+            return _EndpointDimensionConstraints(delta=0)
+        return _EndpointDimensionConstraints.exact(source=len(self.translation), target=len(self.translation))
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "TranslationTransform":
@@ -461,11 +478,11 @@ class RotationTransform(AffineRepresentableTransform):
         assert self.rotation is not None
         return {"type": "rotation", "rotation": [list(row) for row in self.rotation]}
 
-    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+    def _ndim_by_payload(self) -> _EndpointDimensionConstraints:
         if self.rotation is None:
-            return None
+            return _EndpointDimensionConstraints(delta=0)
         rows, cols = matrix_shape(self.rotation)
-        return cols, rows
+        return _EndpointDimensionConstraints.exact(source=cols, target=rows)
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "RotationTransform":
@@ -511,8 +528,8 @@ class AffineTransform(AffineRepresentableTransform):
     def is_invertible(self) -> bool:
         if self.affine is None:
             return False
-        source_ndim, target_ndim = self._ndim_by_payload() or (None, None)
-        if source_ndim != target_ndim:
+        ndim = self._ndim_by_payload()
+        if ndim.is_unconstrained() or ndim.source != ndim.target:
             return False
         return abs(matrix_determinant(self._linear())) > DETERMINANT_SINGULARITY_TOLERANCE
 
@@ -551,13 +568,13 @@ class AffineTransform(AffineRepresentableTransform):
         if not isinstance(earlier, AffineRepresentableTransform):
             return None
         self_ndim = self._ndim_by_payload()
-        assert self_ndim is not None
+        assert self_ndim.source is not None
         try:
-            earlier_affine = earlier._to_affine_transform(target_ndim=self_ndim[0])
+            earlier_affine = earlier._to_affine_transform(target_ndim=self_ndim.source)
         except CannotConvertToAffineError:
             return None
         earlier_ndim = earlier_affine._ndim_by_payload()
-        if earlier_ndim is None or self_ndim[0] != earlier_ndim[1]:
+        if self_ndim.source != earlier_ndim.target:
             return None
         new_linear = matrix_multiply(self._linear(), earlier_affine._linear())
         new_t = tuple(
@@ -643,14 +660,11 @@ class AffineTransform(AffineRepresentableTransform):
         assert self.affine is not None
         return {"type": "affine", "affine": [list(row) for row in self.affine]}
 
-    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+    def _ndim_by_payload(self) -> _EndpointDimensionConstraints:
         if self.affine is None:
-            return None
+            return _EndpointDimensionConstraints()
         rows, cols = matrix_shape(self.affine)
-        return cols - 1, rows
-
-    def _source_ndim_must_eq_target_ndim(self) -> bool:
-        return False
+        return _EndpointDimensionConstraints.exact(source=cols - 1, target=rows)
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "AffineTransform":
@@ -845,11 +859,8 @@ class CoordinatesTransform(Transform):
             result["interpolation"] = self.interpolation
         return result
 
-    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
-        return None
-
-    def _source_ndim_must_eq_target_ndim(self) -> bool:
-        return False
+    def _ndim_by_payload(self) -> _EndpointDimensionConstraints:
+        return _EndpointDimensionConstraints()
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "CoordinatesTransform":
@@ -910,8 +921,9 @@ class DisplacementsTransform(Transform):
             result["interpolation"] = self.interpolation
         return result
 
-    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
-        return None
+    def _ndim_by_payload(self) -> _EndpointDimensionConstraints:
+        """Same source and target dimensionality required by spec for displacements."""
+        return _EndpointDimensionConstraints(delta=0)
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "DisplacementsTransform":
@@ -997,8 +1009,8 @@ class MapAxisTransform(AffineRepresentableTransform):
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         return {"type": "mapAxis", "mapAxis": list(self.map_axis)}
 
-    def _ndim_by_payload(self) -> Tuple[int, int]:
-        return len(self.map_axis), len(self.map_axis)
+    def _ndim_by_payload(self) -> _EndpointDimensionConstraints:
+        return _EndpointDimensionConstraints.exact(source=len(self.map_axis), target=len(self.map_axis))
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "MapAxisTransform":
@@ -1141,12 +1153,12 @@ class ProjectAxisTransform(AffineRepresentableTransform):
             result["createdOutputs"] = list(self.inserts)
         return result
 
-    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
-        # The payload can only imply a *minimum* axis count. That's not helpful for callers here.
-        return None
-
-    def _source_ndim_must_eq_target_ndim(self) -> bool:
-        return False
+    def _ndim_by_payload(self) -> _EndpointDimensionConstraints:
+        return _EndpointDimensionConstraints(
+            source_min=max(self.drops, default=-1) + 1,
+            target_min=max(self.inserts, default=-1) + 1,
+            delta=len(self.inserts) - len(self.drops),
+        )
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "ProjectAxisTransform":
@@ -1269,14 +1281,31 @@ class BijectionTransform(Transform):
             "inverse": self.inverse.to_ome_zarr(version),
         }
 
-    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
+    def _ndim_by_payload(self) -> _EndpointDimensionConstraints:
         forward_ndim = self.forward._ndim_by_payload()
-        if forward_ndim is not None:
-            return forward_ndim
         inverse_ndim = self.inverse._ndim_by_payload()
-        if inverse_ndim is not None:
-            return inverse_ndim[1], inverse_ndim[0]
-        return None
+        if inverse_ndim.is_unconstrained():
+            return forward_ndim
+        inverse_ndim_inverted = _EndpointDimensionConstraints(
+            source=inverse_ndim.target,
+            target=inverse_ndim.source,
+            source_min=inverse_ndim.target_min,
+            target_min=inverse_ndim.source_min,
+            source_max=inverse_ndim.target_max,
+            target_max=inverse_ndim.source_max,
+            delta=-inverse_ndim.delta if inverse_ndim.delta is not None else None,
+        )
+        if forward_ndim.is_unconstrained():
+            return inverse_ndim_inverted
+        return _EndpointDimensionConstraints(
+            source=forward_ndim.source if forward_ndim.source is not None else inverse_ndim_inverted.source,
+            target=forward_ndim.target if forward_ndim.target is not None else inverse_ndim_inverted.target,
+            source_min=_max_optional(forward_ndim.source_min, inverse_ndim_inverted.source_min),
+            target_min=_max_optional(forward_ndim.target_min, inverse_ndim_inverted.target_min),
+            source_max=_min_optional(forward_ndim.source_max, inverse_ndim_inverted.source_max),
+            target_max=_min_optional(forward_ndim.target_max, inverse_ndim_inverted.target_max),
+            delta=forward_ndim.delta if forward_ndim.delta is not None else inverse_ndim_inverted.delta,
+        )
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "BijectionTransform":
@@ -1308,8 +1337,10 @@ class BijectionTransform(Transform):
 
     def _validate_bound_axes(self) -> None:
         ndim = self._ndim_by_payload()
-        if ndim is not None and ndim[0] != ndim[1]:
-            raise ValueError(f"BijectionTransform requires equal input and output dimensionality. Received: {ndim!r}")
+        if ndim.delta is not None and ndim.delta != 0:
+            raise ValueError(
+                f"BijectionTransform requires equal source and target dimensionality. Received: {ndim.delta}"
+            )
 
         Transform._validate_bound_axes(self)
 
@@ -1349,12 +1380,21 @@ class BijectionTransform(Transform):
     def _validate_child_dimensionality(self) -> None:
         forward_ndim = self.forward._ndim_by_payload()
         inverse_ndim = self.inverse._ndim_by_payload()
-        if forward_ndim is not None and inverse_ndim is not None:
-            if forward_ndim[0] != inverse_ndim[1] or forward_ndim[1] != inverse_ndim[0]:
-                raise ValueError(
-                    "BijectionTransform forward and inverse dimensionality disagree: "
-                    f"forward={forward_ndim!r}, inverse={inverse_ndim!r}"
-                )
+        source_disagrees = (
+            forward_ndim.source is not None
+            and inverse_ndim.target is not None
+            and forward_ndim.source != inverse_ndim.target
+        )
+        target_disagrees = (
+            forward_ndim.target is not None
+            and inverse_ndim.source is not None
+            and forward_ndim.target != inverse_ndim.source
+        )
+        if source_disagrees or target_disagrees:
+            raise ValueError(
+                "BijectionTransform forward and inverse dimensionality disagree: "
+                f"forward={forward_ndim!r}, inverse={inverse_ndim!r}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1399,18 +1439,16 @@ class _ByDimensionChild:
         if not isinstance(self.transform, Transform):
             raise ValueError(f"ByDimensionChild must contain a Transform instance, not {self.transform!r}.")
         ndim = self.transform._ndim_by_payload()
-        if ndim is not None:
-            source_ndim, target_ndim = ndim
-            if len(source_indices) != source_ndim:
-                raise ValueError(
-                    f"ByDimensionTransform.child.source_indices must contain {source_ndim} entries for "
-                    f"{type(self.transform).__name__}. Received: {source_indices!r}"
-                )
-            if len(target_indices) != target_ndim:
-                raise ValueError(
-                    f"ByDimensionTransform.child.target_indices must contain {target_ndim} entries for "
-                    f"{type(self.transform).__name__}. Received: {target_indices!r}"
-                )
+        if ndim.source is not None and len(source_indices) != ndim.source:
+            raise ValueError(
+                f"ByDimensionTransform.child.source_indices must contain {ndim.source} entries for "
+                f"{type(self.transform).__name__}. Received: {source_indices!r}"
+            )
+        if ndim.target is not None and len(target_indices) != ndim.target:
+            raise ValueError(
+                f"ByDimensionTransform.child.target_indices must contain {ndim.target} entries for "
+                f"{type(self.transform).__name__}. Received: {target_indices!r}"
+            )
         object.__setattr__(self, "source_indices", source_indices)
         object.__setattr__(self, "target_indices", target_indices)
 
@@ -1580,14 +1618,19 @@ class ByDimensionTransform(Transform):
             "transformations": [item.to_ome_zarr(version) for item in self.transforms],
         }
 
-    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
-        # TODO: This transform type knows its output ndim, but it can't know the exact source ndim.
-        #  E.g. having two children with source_indices (0,) and (0,) is valid. This means the source must have
-        #  *at least* one axis. It might have more, but the others don't flow into a target, i.e. are dropped.
-        return None
-
-    def _source_ndim_must_eq_target_ndim(self) -> bool:
-        return False
+    def _ndim_by_payload(self) -> _EndpointDimensionConstraints:
+        """
+        Source can be any ndim above the largest known index (spec doesn't require all sources to be used).
+        Target is exact - as validated by post_init.
+        """
+        source_ndim_min = max((axis for child in self.transforms for axis in child.source_indices), default=-1) + 1
+        target_ndim = sum(len(child.target_indices) for child in self.transforms)
+        return _EndpointDimensionConstraints(
+            target=target_ndim,
+            source_min=source_ndim_min,
+            target_min=target_ndim,
+            target_max=target_ndim,
+        )
 
     @classmethod
     def from_ome_zarr(cls, ome_dict: Mapping[str, Any]) -> "ByDimensionTransform":
