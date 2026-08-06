@@ -1,5 +1,6 @@
 """Multiscale abstractions for clearly coded metadata provenance"""
 
+from clearscale import ome_zarr
 from clearscale._affines import Affine, Coefficient, Linear
 from clearscale._axis_values import Factor, PixelOffset, PixelSize, Shape, Translation, Unit
 from clearscale._multiscale import (
@@ -24,6 +25,7 @@ __all__ = [
     "DuplicatePolicy",
     "Factor",
     "Multiscale",
+    "ome_zarr",
     "PixelOffset",
     "PixelSize",
     "Scale",
