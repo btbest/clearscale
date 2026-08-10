@@ -959,7 +959,7 @@ class DisplacementsTransform(Transform):
 
 @dataclass(frozen=True, slots=True)
 class MapAxisTransform(AffineRepresentableTransform):
-    """MapAxisTransform represents a pure transposition (no drops or inserts)"""
+    """MapAxisTransform represents a pure permutation (no drops or inserts)"""
 
     map_axis: AxisIndices
 
