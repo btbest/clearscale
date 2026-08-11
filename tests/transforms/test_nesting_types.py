@@ -70,6 +70,15 @@ def test_bijection_rejects_project_axis():
         _ = BijectionTransform(forward=ProjectAxisTransform(), inverse=ProjectAxisTransform())
 
 
+def test_bijection_bound_rejects_mismatching_dims():
+    source = _sys_ref("source", "yx")
+    target = _sys_ref("target", "cyx")
+    bijection = BijectionTransform(forward=ScaleTransform((0.5, 0.5)), inverse=ScaleTransform((2.0, 2.0)))
+
+    with pytest.raises(ValueError, match="BijectionTransform expects 2 target axes"):
+        bijection.bound(source=source, target=target)
+
+
 def test_bijection_composed_with_scale():
     earlier = ScaleTransform((2.0,))
     bijection = BijectionTransform(forward=ScaleTransform((2.0,)), inverse=ScaleTransform((0.5,)))

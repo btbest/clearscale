@@ -14,11 +14,12 @@ from clearscale._transforms import (
     Transform,
     TransformSequence,
     TranslationTransform,
+    NodeRef,
 )
 from clearscale._transforms._transform_types import IDENTITY_TOLERANCE
 
 
-def _sys_ref(name, axes):
+def _sys_ref(name, axes) -> NodeRef[CoordinateSystem]:
     return CoordinateSystem.without_semantics(axes).as_ref(name)
 
 
@@ -286,6 +287,13 @@ def test_translation_simplified_keeps_nonidentity(translation):
     assert simplified is transform
 
 
+def test_rotation_bound_rejects_axis_count_mismatch():
+    world = _sys_ref("world", "yx")
+
+    with pytest.raises(ValueError, match="RotationTransform expects 3 source axes"):
+        RotationTransform(rotation=((0, 1, 0), (-1, 0, 0), (0, 0, 1))).bound(source=world, target=world)
+
+
 def test_path_backed_rotation_round_trips_and_no_ndim():
     rotation = Transform.from_ome_zarr({"type": "rotation", "path": "coordinateTransformations/rotation"})
     assert isinstance(rotation, RotationTransform)
@@ -463,6 +471,52 @@ def test_affine_instantiates_with_any_rectangular(matrix):
 def test_affine_rejects_non_rectangular_or_too_few_cols(matrix, expected_error):
     with pytest.raises(ValueError, match=expected_error):
         _ = AffineTransform(affine=matrix)
+
+
+@pytest.mark.parametrize(
+    "matrix, source_axes, target_axes",
+    [
+        (((0, 0),), "x", "x"),
+        (((0, 0, 0), (0, 0, 0)), "xy", "xy"),
+        (((0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0)), "xyz", "xyz"),
+        (((0, 0, 0, 0, 0), (0, 0, 0, 0, 0), (0, 0, 0, 0, 0), (0, 0, 0, 0, 0)), "cxyz", "cxyz"),
+        (((0, 0, 0),), "xy", "x"),
+        (((0, 0), (0, 0)), "x", "xy"),
+        (((0, 0), (0, 0), (0, 0)), "x", "xyz"),
+        (((0, 0, 0, 0),), "xyz", "x"),
+        (((0, 0, 0), (0, 0, 0), (0, 0, 0)), "xy", "xyz"),
+        (((0, 0, 0), (0, 0, 0), (0, 0, 0), (0, 0, 0)), "xy", "cxyz"),
+    ],
+)
+def test_affine_bound_accepts_matching_axis_counts(matrix, source_axes, target_axes):
+    source = _sys_ref("source", source_axes)
+    target = _sys_ref("target", target_axes)
+    transform = AffineTransform(affine=matrix).bound(source=source, target=target)
+    assert transform.source is source
+    assert transform.target == target
+
+
+@pytest.mark.parametrize(
+    "matrix, source_axes, target_axes, expected_err",
+    [
+        (((0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0)), "x", "xyz", "3 source"),
+        (((0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0)), "xyz", "x", "3 target"),
+        (((0, 0, 0, 0), (0, 0, 0, 0), (0, 0, 0, 0)), "cxyz", "xy", "3 source"),
+        (((0, 0), (0, 0), (0, 0)), "xy", "xyz", "1 source"),
+        (((0, 0), (0, 0), (0, 0)), "x", "xy", "3 target"),
+        (((0, 0), (0, 0), (0, 0)), "xy", "xy", "1 source"),
+        (((0, 0), (0, 0), (0, 0)), "cxyz", "cxyz", "1 source"),
+        (((0, 0, 0, 0),), "xy", "x", "3 source"),
+        (((0, 0, 0, 0),), "xyz", "xy", "1 target"),
+        (((0, 0, 0, 0),), "xy", "xy", "3 source"),
+        (((0, 0, 0, 0),), "xy", "xy", "3 source"),
+    ],
+)
+def test_affine_bound_rejects_mismatching_axis_counts(matrix, source_axes, target_axes, expected_err):
+    source = _sys_ref("source", source_axes)
+    target = _sys_ref("target", target_axes)
+    with pytest.raises(ValueError, match=f"AffineTransform expects {expected_err}"):
+        AffineTransform(affine=matrix).bound(source=source, target=target)
 
 
 def test_affine_transform_inverted():
@@ -912,7 +966,7 @@ def test_coordinates_can_be_bound_and_chained_arbitrarily():
     _bound_seq3 = seq3.bound(source=source, target=target)
 
 
-def test_displacements_bound_reject_changed_axes():
+def test_displacements_bound_rejects_changed_axes():
     displacements = DisplacementsTransform(path="t/vectors.zarr", interpolation="linear")
     source = _sys_ref("source", "cyx")
     target = _sys_ref("target", "tzyx")
@@ -921,7 +975,7 @@ def test_displacements_bound_reject_changed_axes():
         _ = displacements.bound(source=source, target=target)
 
 
-def test_displacements_bound_reject_changed_axes_within_sequence():
+def test_displacements_bound_rejects_changed_axes_within_sequence():
     displacements = DisplacementsTransform(path="t/vectors.zarr", interpolation="linear")
     displacements2 = DisplacementsTransform(path="t/vectors2.zarr", interpolation="linear")
     source = _sys_ref("source", "cyx")
@@ -930,6 +984,15 @@ def test_displacements_bound_reject_changed_axes_within_sequence():
     seq = TransformSequence((displacements, displacements2))
     with pytest.raises(ValueError, match="source and target must be same dimensionality"):
         _ = seq.bound(source=source, target=target)
+
+
+def test_map_axis_bound_rejects_changed_axes():
+    transform = MapAxisTransform((4, 0, 2, 3, 1))
+    source = _sys_ref("source", "tzcyx")
+    target = _sys_ref("target", "tzyx")
+
+    with pytest.raises(ValueError, match="MapAxisTransform expects 5 target axes"):
+        _ = transform.bound(source=source, target=target)
 
 
 @pytest.mark.parametrize(
@@ -1040,25 +1103,24 @@ def test_project_axis_with_drops_is_not_invertible():
 
 @pytest.mark.parametrize(
     "earlier, later, composed",
-    [  # three tuples of (drop, create)
-        (((), ()), ((), ()), ((), ())),
-        (((0,), ()), ((), ()), ((0,), ())),
-        (((), (2,)), ((), ()), ((), (2,))),
-        (((), ()), ((1,), ()), ((1,), ())),
-        (((), ()), ((), (3,)), ((), (3,))),
-        (((0,), ()), ((0,), ()), ((0, 1), ())),
-        (((), (0,)), ((), (0,)), ((), (0, 1))),
-        (((), (0,)), ((), (3,)), ((), (0, 3))),
-        (((), (1,)), ((), (5,)), ((), (1, 5))),
-        (((), ()), ((3,), ()), ((3,), ())),
-        (((2,), ()), ((), (4,)), ((2,), (4,))),
-        (((0,), (0,)), ((0,), (0,)), ((0,), (0,))),
-        (((0,), (0,)), ((0,), ()), ((0,), ())),
-        (((3,), (1,)), ((0,), (0,)), ((0, 3), (0, 1))),
-        (((1,), (3,)), ((0,), (3,)), ((0, 1), (2, 3))),
-        (((1,), (3,)), ((1,), (3,)), ((1, 2), (2, 3))),
-        (((0, 1, 4), (3,)), ((3, 4), ()), ((0, 1, 4, 6), ())),
-        (((), (0, 1)), ((), (0, 5)), ((), (0, 1, 2, 5))),
+    [  # tuples of (drops, inserts)
+        pytest.param(((), ()), ((), ()), ((), ()), id="all ident"),
+        pytest.param(((0,), ()), ((), ()), ((0,), ()), id="drop then ident"),
+        pytest.param(((), (2,)), ((), ()), ((), (2,)), id="insert then ident"),
+        pytest.param(((), ()), ((1,), ()), ((1,), ()), id="ident then drop"),
+        pytest.param(((), ()), ((), (3,)), ((), (3,)), id="ident then insert"),
+        pytest.param(((0,), ()), ((0,), ()), ((0, 1), ()), id="consecutive drop"),
+        pytest.param(((), (0,)), ((), (0,)), ((), (0, 1)), id="consecutive insert"),
+        pytest.param(((), (0,)), ((), (3,)), ((), (0, 3)), id="insert then insert higher"),
+        pytest.param(((), (3,)), ((), (1,)), ((), (1, 4)), id="insert then insert lower"),
+        pytest.param(((2,), ()), ((), (4,)), ((2,), (4,)), id="drop then insert"),
+        pytest.param(((0,), (0,)), ((0,), (0,)), ((0,), (0,)), id="repeatedly drop-insert same axis"),
+        pytest.param(((0,), (0,)), ((0,), ()), ((0,), ()), id="drop intermediately inserted axis"),
+        pytest.param(((3,), (1,)), ((0,), (0,)), ((0, 3), (0, 1)), id="later swaps unrelated axis"),
+        pytest.param(((1,), (3,)), ((0,), (3,)), ((0, 1), (2, 3)), id="later inserts higher axis"),
+        pytest.param(((1,), (3,)), ((1,), (3,)), ((1, 2), (2, 3)), id="stack same indices"),
+        pytest.param(((0, 1, 4), (3,)), ((3, 4), ()), ((0, 1, 4, 6), ()), id="later drops earlier insert"),
+        pytest.param(((), (0, 1)), ((), (0, 5)), ((), (0, 1, 2, 5)), id="accumulate inserts"),
     ],
 )
 def test_project_axis_composed(earlier, later, composed):
