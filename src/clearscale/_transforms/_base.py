@@ -672,29 +672,93 @@ class Transform(ABC):
     def _validate_bound_axes(self) -> None:
         source_axes = tuple(self.source.owner.axes()) if isinstance(self.source, NodeRef) else None
         target_axes = tuple(self.target.owner.axes()) if isinstance(self.target, NodeRef) else None
+        self._validate_ndims_compatible_with_payload(
+            len(source_axes) if source_axes is not None else None,
+            len(target_axes) if target_axes is not None else None,
+            source_axes=source_axes,
+            target_axes=target_axes,
+        )
 
+    def _validate_ndims_compatible_with_payload(
+        self,
+        source_ndim: Optional[int],
+        target_ndim: Optional[int],
+        *,
+        source_axes: Optional[OrderedAxes] = None,
+        target_axes: Optional[OrderedAxes] = None,
+    ) -> None:
         ndim = self._ndim_by_payload()
-        if source_axes is not None and ndim.source is not None and len(source_axes) != ndim.source:
-            raise ValueError(
-                f"{self.__class__.__name__} expects {ndim.source} source axes, but its source "
-                f"coordinate system has {len(source_axes)}: {list(source_axes)}"
-            )
-        if target_axes is not None and ndim.target is not None and len(target_axes) != ndim.target:
-            raise ValueError(
-                f"{self.__class__.__name__} expects {ndim.target} target axes, but its target "
-                f"coordinate system has {len(target_axes)}: {list(target_axes)}"
-            )
+        if ndim.is_unconstrained():
+            return
 
-        if (
-            ndim.delta == 0
-            and source_axes is not None
-            and target_axes is not None
-            and len(source_axes) != len(target_axes)
-        ):
-            raise ValueError(
-                f"{self.__class__.__name__} source and target must be same dimensionality: "
-                f"source {list(source_axes)} vs target {list(target_axes)}"
-            )
+        source_axes_suffix = f": {list(source_axes)}" if source_axes is not None else ""
+        target_axes_suffix = f": {list(target_axes)}" if target_axes is not None else ""
+
+        if source_ndim is not None:
+            if ndim.source is not None:
+                assert ndim.source_min == ndim.source_max == ndim.source, "enforced by constraint-object"
+                if source_ndim != ndim.source:
+                    raise ValueError(
+                        f"{self.__class__.__name__} expects {ndim.source} source axes, but its source "
+                        f"coordinate system has {source_ndim}{source_axes_suffix}"
+                    )
+            else:
+                if ndim.source_min is not None and source_ndim < ndim.source_min:
+                    raise ValueError(
+                        f"{self.__class__.__name__} requires at least {ndim.source_min} source axes, but its source "
+                        f"coordinate system has {source_ndim}{source_axes_suffix}"
+                    )
+                if ndim.source_max is not None and source_ndim > ndim.source_max:
+                    raise ValueError(
+                        f"{self.__class__.__name__} allows at most {ndim.source_max} source axes, but its source "
+                        f"coordinate system has {source_ndim}{source_axes_suffix}"
+                    )
+
+        if target_ndim is not None:
+            if ndim.target is not None:
+                assert ndim.target_min == ndim.target_max == ndim.target, "enforced by constraint-object"
+                if target_ndim != ndim.target:
+                    raise ValueError(
+                        f"{self.__class__.__name__} expects {ndim.target} target axes, but its target "
+                        f"coordinate system has {target_ndim}{target_axes_suffix}"
+                    )
+            else:
+                if ndim.target_min is not None and target_ndim < ndim.target_min:
+                    raise ValueError(
+                        f"{self.__class__.__name__} requires at least {ndim.target_min} target axes, but its target "
+                        f"coordinate system has {target_ndim}{target_axes_suffix}"
+                    )
+                if ndim.target_max is not None and target_ndim > ndim.target_max:
+                    raise ValueError(
+                        f"{self.__class__.__name__} allows at most {ndim.target_max} target axes, but its target "
+                        f"coordinate system has {target_ndim}{target_axes_suffix}"
+                    )
+
+        if ndim.delta is not None and source_ndim is not None and target_ndim is not None:
+            actual_delta = target_ndim - source_ndim
+            if actual_delta != ndim.delta:
+                if ndim.delta == 0:
+                    if source_axes is not None and target_axes is not None:
+                        msg = (
+                            f"{self.__class__.__name__} source and target must be same dimensionality: "
+                            f"source {list(source_axes)} vs target {list(target_axes)}"
+                        )
+                    else:
+                        msg = (
+                            f"{self.__class__.__name__} source and target must be same dimensionality: "
+                            f"source ndim={source_ndim} vs target ndim={target_ndim}"
+                        )
+                else:
+                    axes_suffix = (
+                        f": source {list(source_axes)} vs target {list(target_axes)}"
+                        if source_axes is not None and target_axes is not None
+                        else ""
+                    )
+                    msg = (
+                        f"{self.__class__.__name__} requires target - source ndim = {ndim.delta}, "
+                        f"but the bound coordinate systems have delta={actual_delta}{axes_suffix}"
+                    )
+                raise ValueError(msg)
 
     def _endpoints_can_chain_after(self, earlier: "Transform") -> bool:
         if earlier.target is not None and self.source is not None:
@@ -777,7 +841,8 @@ class TransformSequence(Transform):
             return IdentityTransform(source=self.source, target=self.target)
         if len(simplified_flattened) == 1:
             return simplified_flattened[0].bound(source=self.source, target=self.target)
-        return replace(self, transforms=tuple(simplified_flattened)).bound(source=self.source, target=self.target)
+        endpoints_cleared = replace(self, transforms=tuple(simplified_flattened), source=None, target=None)
+        return endpoints_cleared.bound(source=self.source, target=self.target)
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         return {
@@ -805,6 +870,14 @@ class TransformSequence(Transform):
             object.__setattr__(self, "source", inferred_source)
         if self.target is None and inferred_target is not None:
             object.__setattr__(self, "target", inferred_target)
+        if self.source != inferred_source and inferred_source is not None:
+            raise ValueError(
+                f"TransformSequence.source must be (first child).source. Received {self.source!r} != {inferred_source!r}"
+            )
+        if self.target != inferred_target and inferred_target is not None:
+            raise ValueError(
+                f"TransformSequence.target must be (last child).target. Received {self.target!r} != {inferred_target!r}"
+            )
         self._validate_child_ndim_chain()
         Transform.__post_init__(self)
 
@@ -889,30 +962,49 @@ class TransformSequence(Transform):
         return self.collapsed().simplified()
 
     def _validate_child_ndim_chain(self) -> None:
-        earlier_target_ndim: Optional[int] = None
+        earlier_target_min: Optional[int] = None
+        earlier_target_max: Optional[int] = None
         earlier: Optional[Transform] = None
 
         for transform in self.transforms:
             ndim = transform._ndim_by_payload()
-            if ndim.is_unconstrained():
-                earlier_target_ndim = None
-                earlier = None
-                continue
+            source_min = ndim.source_min
+            source_max = ndim.source_max
 
-            if earlier_target_ndim is not None and ndim.source is not None and ndim.source != earlier_target_ndim:
-                assert earlier is not None
+            if earlier_target_min is not None:
+                source_min = max(source_min or earlier_target_min, earlier_target_min)
+            if earlier_target_max is not None:
+                source_max = min(source_max or earlier_target_max, earlier_target_max)
+
+            if source_max is not None and source_min is not None and source_min > source_max:
+                assert earlier is not None, "cannot happen in the first iteration"
+                # source_max must have come from earlier. min>max on current ndim would be dev error caught earlier.
                 raise ValueError(
-                    "Transform chain dimensionality mismatches: "
-                    f"{type(earlier).__name__}(target_ndim={earlier_target_ndim!r}) != "
-                    f"{type(transform).__name__}(source_ndim={ndim.source!r})"
+                    f"Transform chain ndim mismatch: {source_min=} > {source_max=}. "
+                    f"{type(earlier).__name__}(ndim={earlier._ndim_by_payload()!r}) != "
+                    f"{type(transform).__name__}(ndim={ndim!r})"
                 )
 
-            if ndim.target is not None:
-                earlier_target_ndim = ndim.target
-                earlier = transform
-            elif ndim.delta != 0:
-                earlier_target_ndim = None
-                earlier = None
+            if ndim.delta is None:
+                target_min = ndim.target_min
+                target_max = ndim.target_max
+            else:
+                target_min = source_min + ndim.delta if source_min is not None else None
+                target_max = source_max + ndim.delta if source_max is not None else None
+                if ndim.target_min is not None:
+                    target_min = max(target_min or ndim.target_min, ndim.target_min)
+                if ndim.target_max is not None:
+                    target_max = min(target_max if target_max is not None else ndim.target_max, ndim.target_max)
+
+            if target_min is not None and target_max is not None and target_min > target_max:
+                raise ValueError(
+                    f"Transform chain ndim mismatch: {target_min=} > {target_max=}. "
+                    f"{type(transform).__name__}(ndim={ndim!r}) after {source_min=}, {source_max=}"
+                )
+
+            earlier_target_min = target_min
+            earlier_target_max = target_max
+            earlier = transform
 
 
 def _ordered_unique_refs(refs: Iterable[_RefT]) -> Tuple[_RefT, ...]:

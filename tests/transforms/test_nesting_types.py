@@ -22,7 +22,7 @@ def _sys_ref(name, axes):
     return CoordinateSystem.without_semantics(axes).as_ref(name)
 
 
-def test_bijection_infers_endpoints_from_child():
+def test_bijection_syncs_endpoints_with_children():
     source = _sys_ref("source", "cyx")
     target = _sys_ref("target", "cyx")
     forward = ScaleTransform((1.0, 2.0, 2.0))
@@ -48,34 +48,65 @@ def test_bijection_infers_endpoints_from_child():
 
 
 def test_bijection_rejects_mismatching_child_endpoint():
-    source = _sys_ref("source", "cyx")
-    other_source = _sys_ref("source", "cyx")  # value-equal but not identical
+    sys = _sys_ref("system", "cyx")
+    other_sys = _sys_ref("system", "cyx")  # value-equal but not identical
+    unbound = IdentityTransform()
 
-    with pytest.raises(ValueError, match="BijectionTransform endpoint does not match parent endpoint"):
-        _ = BijectionTransform(
-            forward=IdentityTransform(source=source), inverse=IdentityTransform(), source=other_source
-        )
-
-
-def test_bijection_transform_validates_inverse_dimensionality():
-    with pytest.raises(ValueError, match="forward and inverse dimensionality disagree"):
-        BijectionTransform(
-            forward=ScaleTransform(scale=(1, 1, 1)),
-            inverse=ScaleTransform(scale=(1, 1)),
-        )
+    with pytest.raises(ValueError, match="BijectionTransform.source must be .forward.source"):
+        _ = BijectionTransform(forward=IdentityTransform(source=sys), inverse=unbound, source=other_sys)
+    with pytest.raises(ValueError, match="BijectionTransform.target must be .forward.target"):
+        _ = BijectionTransform(forward=IdentityTransform(target=sys), inverse=unbound, target=other_sys)
+    with pytest.raises(ValueError, match="BijectionTransform.target must be .inverse.source"):
+        _ = BijectionTransform(forward=unbound, inverse=IdentityTransform(source=sys), target=other_sys)
+    with pytest.raises(ValueError, match="BijectionTransform.source must be .inverse.target"):
+        _ = BijectionTransform(forward=unbound, inverse=IdentityTransform(target=sys), source=other_sys)
 
 
-def test_bijection_rejects_project_axis():
-    with pytest.raises(ValueError, match="ProjectAxisTransforms cannot be used in BijectionTransform"):
-        _ = BijectionTransform(forward=ProjectAxisTransform(), inverse=ProjectAxisTransform())
+@pytest.mark.parametrize(
+    "forward, inverse, expected_error",
+    [
+        pytest.param(
+            ScaleTransform(scale=(1, 1, 1)),
+            ScaleTransform(scale=(1, 1)),
+            "expected ndim must be equal",
+            id="mismatching exact",
+        ),
+        pytest.param(
+            ScaleTransform(scale=(1,)),
+            ProjectAxisTransform(drops=(0,), inserts=(1,)),
+            "must be 2 <= 1 <= 1",
+            id="A < B min",
+        ),
+        # The "A > B max" and "A min > B max" case is untestable:
+        # There is no transform with `exact is None and *_max is not None`
+        # So if "A > B max", then B also has exact, which is the first test case.
+    ],
+)
+def test_bijection_rejects_children_with_incompatible_ndim(forward: Transform, inverse: Transform, expected_error: str):
+    with pytest.raises(ValueError, match=expected_error):
+        BijectionTransform(forward=forward, inverse=inverse)
 
 
-def test_bijection_bound_rejects_mismatching_dims():
-    source = _sys_ref("source", "yx")
-    target = _sys_ref("target", "cyx")
+def test_bijection_rejects_ndim_delta():
+    with pytest.raises(ValueError, match="BijectionTransform cannot contain dimensionality changes"):
+        _ = BijectionTransform(forward=ProjectAxisTransform(drops=(0,)), inverse=ProjectAxisTransform(inserts=(0,)))
+
+
+def test_bijection_bound_rejects_mismatching_dims_exact():
+    source = _sys_ref("source", "xyz")
+    target = _sys_ref("source", "xy")
     bijection = BijectionTransform(forward=ScaleTransform((0.5, 0.5)), inverse=ScaleTransform((2.0, 2.0)))
 
-    with pytest.raises(ValueError, match="BijectionTransform expects 2 target axes"):
+    with pytest.raises(ValueError, match=f"BijectionTransform expects 2 source axes"):
+        bijection.bound(source=source, target=target)
+
+
+def test_bijection_bound_rejects_mismatching_dims_min():
+    source = _sys_ref("source", "xy")
+    target = _sys_ref("source", "xy")
+    bijection = BijectionTransform(forward=ProjectAxisTransform(drops=(2,), inserts=(2,)), inverse=IdentityTransform())
+
+    with pytest.raises(ValueError, match=f"BijectionTransform requires at least 3 source axes"):
         bijection.bound(source=source, target=target)
 
 
@@ -252,7 +283,7 @@ def test_by_dimension_rejects_sourcing_more_axes_than_bound():
     target = _sys_ref("target", "yx")
     item = _ByDimensionChild(source_indices=(1, 2), target_indices=(0, 1), transform=ScaleTransform(scale=(1, 1)))
 
-    with pytest.raises(ValueError, match="input axis outside source axes"):
+    with pytest.raises(ValueError, match="ByDimensionTransform requires at least 3 source axes"):
         ByDimensionTransform(transforms=(item,), source=bad_source, target=target)
 
 
@@ -261,7 +292,7 @@ def test_by_dimension_rejects_targeting_fewer_axes_than_bound():
     bad_target = _sys_ref("target", "zyx")
     item = _ByDimensionChild(source_indices=(1, 2), target_indices=(0, 1), transform=ScaleTransform(scale=(1, 1)))
 
-    with pytest.raises(ValueError, match="must cover target axes"):
+    with pytest.raises(ValueError, match="ByDimensionTransform expects 2 target axes"):
         ByDimensionTransform(transforms=(item,), source=source, target=bad_target)
 
 
@@ -527,46 +558,7 @@ def test_by_dimension_simplified_detects_no_simplification():
     assert simplified is transform
 
 
-def test_transform_sequence_rejects_mismatched_axis_value_counts():
-    with pytest.raises(
-        ValueError,
-        match=re.escape(
-            "Transform chain dimensionality mismatches: ScaleTransform(target_ndim=2) != TranslationTransform(source_ndim=3)"
-        ),
-    ):
-        TransformSequence((ScaleTransform(scale=(1, 1)), TranslationTransform(translation=(0, 0, 0))))
-
-
-def test_bound_transform_sequence_rejects_endpoint_axis_count_mismatch():
-    source = _sys_ref("source", "yx")
-    target = _sys_ref("target", "zyx")
-    sequence = TransformSequence((IdentityTransform(), IdentityTransform()))
-
-    with pytest.raises(ValueError, match="source and target must be same dimensionality"):
-        sequence.bound(source=source, target=target)
-
-
-def test_transform_sequence_infers_endpoint_dimensionality_through_identity():
-    source = _sys_ref("source", "yx")
-    target = _sys_ref("target", "yx")
-    sequence = TransformSequence((IdentityTransform(), IdentityTransform(), TranslationTransform(translation=(0, 0))))
-
-    bound = sequence.bound(source=source, target=target)
-
-    assert bound.source == source
-    assert bound.target == target
-
-
-def test_transform_sequence_rejects_endpoint_mismatch_inferred_through_identity():
-    source = _sys_ref("source", "zyx")
-    target = _sys_ref("target", "yx")
-    sequence = TransformSequence((IdentityTransform(), IdentityTransform(), TranslationTransform(translation=(0, 0))))
-
-    with pytest.raises(ValueError, match="source and target must be same dimensionality"):
-        sequence.bound(source=source, target=target)
-
-
-def test_transform_sequence_accepts_consistent_dimensionality_through_identity():
+def test_transform_sequence_accepts_consistent_ndim_through_identity():
     _ = TransformSequence(
         (
             ScaleTransform((0.25, 0.25)),
@@ -577,7 +569,7 @@ def test_transform_sequence_accepts_consistent_dimensionality_through_identity()
     )
 
 
-def test_transform_sequence_allows_dimension_change_through_project_axis():
+def test_transform_sequence_accepts_ndim_change_matching_delta():
     _ = TransformSequence(
         (
             ScaleTransform((1, 1, 1)),
@@ -587,12 +579,29 @@ def test_transform_sequence_allows_dimension_change_through_project_axis():
     )
 
 
-def test_transform_sequence_rejects_inconsistent_dimensionality_through_identity():
+def test_transform_sequence_accepts_ndim_change_matching_cumulative_delta():
+    _ = TransformSequence(
+        (
+            ScaleTransform((1, 1, 1, 1, 1)),
+            ProjectAxisTransform(drops=(0,)),
+            ProjectAxisTransform(drops=(0, 1)),
+            ScaleTransform((2, 2)),
+        )
+    )
+
+
+def test_transform_sequence_rejects_mismatched_exact_ndim():
     with pytest.raises(
         ValueError,
-        match=re.escape(
-            "Transform chain dimensionality mismatches: ScaleTransform(target_ndim=3) != TranslationTransform(source_ndim=2)"
-        ),
+        match="Transform chain ndim mismatch: source_min=3 > source_max=2",
+    ):
+        TransformSequence((ScaleTransform(scale=(1, 1)), TranslationTransform(translation=(0, 0, 0))))
+
+
+def test_transform_sequence_rejects_mismatched_exact_ndim_through_identity():
+    with pytest.raises(
+        ValueError,
+        match="Transform chain ndim mismatch: source_min=3 > source_max=2",
     ):
         _ = TransformSequence(
             (
@@ -604,7 +613,109 @@ def test_transform_sequence_rejects_inconsistent_dimensionality_through_identity
         )
 
 
-def test_collapsed_scale_sequence_preserves_bound_endpoints():
+def test_transform_sequence_rejects_less_than_source_min():
+    with pytest.raises(
+        ValueError,
+        match="Transform chain ndim mismatch: source_min=3 > source_max=2",
+    ):
+        _ = TransformSequence(
+            (
+                ScaleTransform((0.5, 0.5)),
+                ProjectAxisTransform(drops=(2,)),  # delta=-1 satisfied, but index 2 means source_min=3
+                TranslationTransform(translation=(0,)),
+            )
+        )
+
+
+def test_transform_sequence_rejects_less_than_target_min():
+    with pytest.raises(
+        ValueError,
+        match="Transform chain ndim mismatch: target_min=3 > target_max=2",
+    ):
+        _ = TransformSequence(
+            (
+                ScaleTransform((0.5,)),
+                ProjectAxisTransform(inserts=(2,)),  # delta=1 satisfied, but index 2 means target_min=3
+                TranslationTransform(translation=(0, 0)),
+            )
+        )
+
+
+def test_transform_sequence_rejects_mismatched_delta():
+    with pytest.raises(
+        ValueError,
+        match="Transform chain ndim mismatch: source_min=2 > source_max=1",
+    ):
+        _ = TransformSequence(
+            (
+                ScaleTransform((0.5, 0.5, 0.5)),
+                ProjectAxisTransform(drops=(2,)),  # source_min 3 satisfied, but one drop means delta=-1
+                TranslationTransform(translation=(0,)),
+            )
+        )
+
+
+def test_transform_sequence_rejects_mismatched_cumulative_delta():
+    with pytest.raises(
+        ValueError,
+        match="Transform chain ndim mismatch: source_min=5 > source_max=2",
+    ):
+        _ = TransformSequence(
+            (
+                ScaleTransform((0.5, 0.5, 0.5)),  # ndim 3
+                ProjectAxisTransform(drops=(0,)),  # -1
+                ProjectAxisTransform(inserts=(0, 1)),  # +2 = 1
+                ProjectAxisTransform(drops=(0,)),  # -1 = 0
+                ProjectAxisTransform(inserts=(0, 1)),  # +2 = 2 total delta -> ndim = 3+2 = 5
+                TranslationTransform(translation=(0, 0)),
+            )
+        )
+
+
+def test_transform_sequence_rejects_cumulative_delta_below_1():
+    with pytest.raises(
+        ValueError,
+        match="Transform chain ndim mismatch: source_min=2 > source_max=1",
+    ):
+        _ = TransformSequence(
+            (
+                ScaleTransform((0.5, 0.5, 0.5)),
+                ProjectAxisTransform(drops=(0, 1)),
+                ProjectAxisTransform(drops=(0, 1)),
+            )
+        )
+
+
+def test_transform_sequence_bound_infers_endpoint_ndim_through_identity():
+    source = _sys_ref("source", "yx")
+    target = _sys_ref("target", "yx")
+    sequence = TransformSequence((IdentityTransform(), IdentityTransform(), TranslationTransform(translation=(0, 0))))
+
+    bound = sequence.bound(source=source, target=target)
+
+    assert bound.source == source
+    assert bound.target == target
+
+
+def test_transform_sequence_bound_rejects_endpoint_ndim_mismatch():
+    source = _sys_ref("source", "yx")
+    target = _sys_ref("target", "zyx")
+    sequence = TransformSequence((IdentityTransform(), IdentityTransform()))
+
+    with pytest.raises(ValueError, match="source and target must be same dimensionality"):
+        sequence.bound(source=source, target=target)
+
+
+def test_transform_sequence_bound_rejects_endpoint_ndim_mismatch_through_identity():
+    source = _sys_ref("source", "zyx")
+    target = _sys_ref("target", "yx")
+    sequence = TransformSequence((IdentityTransform(), IdentityTransform(), TranslationTransform(translation=(0, 0))))
+
+    with pytest.raises(ValueError, match="source and target must be same dimensionality"):
+        sequence.bound(source=source, target=target)
+
+
+def test_transform_sequence_collapsed_preserves_bound_endpoints():
     source = _sys_ref("source", "yx")
     middle = _sys_ref("middle", "yx")
     target = _sys_ref("target", "yx")

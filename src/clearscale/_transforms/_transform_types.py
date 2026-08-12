@@ -882,9 +882,6 @@ class CoordinatesTransform(Transform):
             )
         Transform.__post_init__(self)
 
-    def _validate_bound_axes(self) -> None:
-        return None
-
     @staticmethod
     def _parse_interpolation(ome_dict: Mapping[str, Any]) -> Optional[str]:
         interpolation = ome_dict.get("interpolation")
@@ -1184,37 +1181,6 @@ class ProjectAxisTransform(AffineRepresentableTransform):
         object.__setattr__(self, "inserts", inserts)
         Transform.__post_init__(self)
 
-    def _validate_bound_axes(self) -> None:
-        source_axes = tuple(self.source.owner.axes()) if isinstance(self.source, NodeRef) else None
-        target_axes = tuple(self.target.owner.axes()) if isinstance(self.target, NodeRef) else None
-
-        if source_axes is not None:
-            source_ndim = len(source_axes)
-            if any(index >= source_ndim for index in self.drops):
-                raise ValueError(
-                    f"ProjectAxisTransform drops input index outside source axes {list(source_axes)}: "
-                    f"{self.drops!r}"
-                )
-        else:
-            source_ndim = None
-
-        if target_axes is not None:
-            target_ndim = len(target_axes)
-            if any(index >= target_ndim for index in self.inserts):
-                raise ValueError(
-                    f"ProjectAxisTransform inserts output index outside target axes {target_axes}: {self.inserts!r}"
-                )
-        else:
-            target_ndim = None
-
-        if source_ndim is not None and target_ndim is not None:
-            expected_target_ndim = source_ndim - len(self.drops) + len(self.inserts)
-            if expected_target_ndim != target_ndim:
-                raise ValueError(
-                    f"ProjectAxisTransform expects {expected_target_ndim} target axes from source axes "
-                    f"{source_axes} but target coordinate system has {target_ndim}: {target_axes}"
-                )
-
 
 @dataclass(frozen=True, slots=True)
 class BijectionTransform(Transform):
@@ -1325,34 +1291,11 @@ class BijectionTransform(Transform):
     def __post_init__(self):
         if not isinstance(self.forward, Transform) or not isinstance(self.inverse, Transform):
             raise ValueError("BijectionTransform forward and inverse must be Transform instances.")
-        if isinstance(self.forward, ProjectAxisTransform) or isinstance(self.inverse, ProjectAxisTransform):
-            # Unless the ProjectAxis is a noop, one of the directions destroys information by dropping axes.
-            # Specifying them as inverses of each other is always semantically inaccurate.
-            # Just forbid using it. If necessary for convenience, the noop could be allowed.
-            raise ValueError("ProjectAxisTransforms cannot be used in BijectionTransform.")
-        self._infer_endpoints_from_children()
-        self._validate_child_endpoints()
-        self._validate_child_dimensionality()
+        self._ensure_parent_and_child_endpoints_synced()
+        self._validate_children_ndims_agree()
         Transform.__post_init__(self)
 
-    def _validate_bound_axes(self) -> None:
-        ndim = self._ndim_by_payload()
-        if ndim.delta is not None and ndim.delta != 0:
-            raise ValueError(
-                f"BijectionTransform requires equal source and target dimensionality. Received: {ndim.delta}"
-            )
-
-        Transform._validate_bound_axes(self)
-
-        source_axes = tuple(self.source.owner.axes()) if isinstance(self.source, NodeRef) else None
-        target_axes = tuple(self.target.owner.axes()) if isinstance(self.target, NodeRef) else None
-        if source_axes is not None and target_axes is not None and len(source_axes) != len(target_axes):
-            raise ValueError(
-                f"BijectionTransform endpoints have incompatible dimensionality: "
-                f"source {list(source_axes)} vs target {list(target_axes)}"
-            )
-
-    def _infer_endpoints_from_children(self) -> None:
+    def _ensure_parent_and_child_endpoints_synced(self):
         if self.source is None and self.forward.source is not None:
             object.__setattr__(self, "source", self.forward.source)
         if self.target is None and self.forward.target is not None:
@@ -1361,40 +1304,62 @@ class BijectionTransform(Transform):
             object.__setattr__(self, "source", self.inverse.target)
         if self.target is None and self.inverse.source is not None:
             object.__setattr__(self, "target", self.inverse.source)
+        if self.source != self.forward.source and self.forward.source is not None:
+            raise ValueError(
+                f"BijectionTransform.source must be .forward.source. Received {self.source!r} != {self.forward.source!r}"
+            )
+        if self.target != self.forward.target and self.forward.target is not None:
+            raise ValueError(
+                f"BijectionTransform.target must be .forward.target. Received {self.target!r} != {self.forward.target!r}"
+            )
+        if self.source != self.inverse.target and self.inverse.target is not None:
+            raise ValueError(
+                f"BijectionTransform.source must be .inverse.target. Received {self.source!r} != {self.inverse.target!r}"
+            )
+        if self.target != self.inverse.source and self.inverse.source is not None:
+            raise ValueError(
+                f"BijectionTransform.target must be .inverse.source. Received {self.target!r} != {self.inverse.source!r}"
+            )
 
-    def _validate_child_endpoints(self) -> None:
-        expectations = (
-            ("forward input", self.forward.source, self.source),
-            ("forward output", self.forward.target, self.target),
-            ("inverse input", self.inverse.source, self.target),
-            ("inverse output", self.inverse.target, self.source),
-        )
-        for label, actual, expected in expectations:
-            if actual is not None and expected is not None and actual != expected:
-                raise ValueError(
-                    f"BijectionTransform endpoint does not match parent endpoint. "
-                    f"Received {label}: (ID {id(actual)}) {actual!r}, "
-                    f"vs parent: (ID {id(expected)}) {expected!r}"
-                )
+    def _validate_children_ndims_agree(self):
+        forward = self.forward._ndim_by_payload()
+        inverse = self.inverse._ndim_by_payload()
 
-    def _validate_child_dimensionality(self) -> None:
-        forward_ndim = self.forward._ndim_by_payload()
-        inverse_ndim = self.inverse._ndim_by_payload()
-        source_disagrees = (
-            forward_ndim.source is not None
-            and inverse_ndim.target is not None
-            and forward_ndim.source != inverse_ndim.target
-        )
-        target_disagrees = (
-            forward_ndim.target is not None
-            and inverse_ndim.source is not None
-            and forward_ndim.target != inverse_ndim.source
-        )
-        if source_disagrees or target_disagrees:
+        if forward.delta not in (None, 0) or inverse.delta not in (None, 0):
+            raise ValueError(
+                "BijectionTransform cannot contain dimensionality changes; "
+                f"received {forward.delta=} and {inverse.delta=}"
+            )
+
+        exact_ndim = (forward.source, forward.target, inverse.source, inverse.target)
+        exact_values = [v for v in exact_ndim if v is not None]
+        if len(set(exact_values)) > 1:
             raise ValueError(
                 "BijectionTransform forward and inverse dimensionality disagree: "
-                f"forward={forward_ndim!r}, inverse={inverse_ndim!r}"
+                f"expected ndim must be equal; received {exact_ndim} from {forward=} and {inverse=}"
             )
+
+        exact: Optional[int] = next(iter(exact_values), None)
+        lower_bound = _max_optional(forward.source_min, forward.target_min, inverse.source_min, inverse.target_min) or 0
+        upper_bound = _min_optional(forward.source_max, forward.target_max, inverse.source_max, inverse.target_max)
+        # Note about asserts below:
+        # There is no transform that has `exact is None and *_max is not None`,
+        # i.e. no transform knows its upper bound, but not its exact dimensionality.
+        if exact is not None:
+            if exact < lower_bound:
+                raise ValueError(
+                    "BijectionTransform forward and inverse dimensionality disagree: "
+                    f"must be {lower_bound} <= {exact} <= {upper_bound}; from {forward=} and {inverse=}"
+                )
+            assert upper_bound is not None, "constraint validation enforces that if exact, then max must also be set"
+            assert exact <= upper_bound, (
+                "BijectionTransform forward and inverse dimensionality disagree: "
+                f"must be {exact=} <= {upper_bound}; {exact_ndim} from {forward=} and {inverse=}"
+            )
+        assert exact is None or upper_bound is None or lower_bound <= upper_bound, (
+            "BijectionTransform forward and inverse dimensionality disagree: "
+            f"must be {lower_bound=} <= {upper_bound}; {exact_ndim} from {forward=} and {inverse=}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1438,17 +1403,7 @@ class _ByDimensionChild:
         _validate_unique(target_indices, "ByDimensionTransform.child.target_indices")
         if not isinstance(self.transform, Transform):
             raise ValueError(f"ByDimensionChild must contain a Transform instance, not {self.transform!r}.")
-        ndim = self.transform._ndim_by_payload()
-        if ndim.source is not None and len(source_indices) != ndim.source:
-            raise ValueError(
-                f"ByDimensionTransform.child.source_indices must contain {ndim.source} entries for "
-                f"{type(self.transform).__name__}. Received: {source_indices!r}"
-            )
-        if ndim.target is not None and len(target_indices) != ndim.target:
-            raise ValueError(
-                f"ByDimensionTransform.child.target_indices must contain {ndim.target} entries for "
-                f"{type(self.transform).__name__}. Received: {target_indices!r}"
-            )
+        self.transform._validate_ndims_compatible_with_payload(len(source_indices), len(target_indices))
         object.__setattr__(self, "source_indices", source_indices)
         object.__setattr__(self, "target_indices", target_indices)
 
@@ -1660,23 +1615,3 @@ class ByDimensionTransform(Transform):
             )
         object.__setattr__(self, "transforms", children)
         Transform.__post_init__(self)
-
-    def _validate_bound_axes(self) -> None:
-        source_axes = tuple(self.source.owner.axes()) if isinstance(self.source, NodeRef) else None
-        target_axes = tuple(self.target.owner.axes()) if isinstance(self.target, NodeRef) else None
-
-        if source_axes is not None:
-            source_ndim = len(source_axes)
-            for item in self.transforms:
-                if any(axis >= source_ndim for axis in item.source_indices):
-                    raise ValueError(
-                        f"ByDimensionTransform input axis outside source axes {list(source_axes)}: "
-                        f"{item.source_indices!r}"
-                    )
-
-        output_axes = tuple(axis for item in self.transforms for axis in item.target_indices)
-        if target_axes is not None and set(output_axes) != set(range(len(target_axes))):
-            raise ValueError(
-                f"ByDimensionTransform output axes must cover target axes {list(target_axes)}. "
-                f"Received: {output_axes!r}"
-            )

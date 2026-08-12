@@ -1075,11 +1075,57 @@ def test_map_axis_rejects_mismatching_dims():
         _ = MapAxisTransform((0, 1, 2), source=source, target=bad_target)
 
 
-def test_project_axis_matches_differing_endpoint_ndim():
-    source = _sys_ref("source", "cyx")
-    target = _sys_ref("target", "ij")
+@pytest.mark.parametrize(
+    "drops,inserts,source_axes,target_axes",
+    [
+        pytest.param((2,), (2,), "xyz", "xyz", id="noop 3d at min"),
+        pytest.param((), (), "xyz", "xyz", id="noop 3d above min"),
+        pytest.param((2,), (), "xyz", "xy", id="drop 1 source at min"),
+        pytest.param((2,), (), "tcxyz", "tcyz", id="drop 1 source above min"),
+        pytest.param((), (2,), "xy", "xyz", id="insert 1 target at min"),
+        pytest.param((), (2,), "tcxy", "tczxy", id="insert 1 target above min"),
+    ],
+)
+def test_project_axis_bound_accepts_ndim_at_and_above_highest_index(drops, inserts, source_axes, target_axes):
+    source = _sys_ref("source", source_axes)
+    target = _sys_ref("target", target_axes)
 
-    _ = ProjectAxisTransform(drops=(0,), source=source, target=target)
+    transform = ProjectAxisTransform(drops=drops, inserts=inserts, source=source, target=target)
+
+    assert transform.is_fully_bound
+
+
+@pytest.mark.parametrize(
+    "drops,inserts,source_axes,target_axes",
+    [
+        pytest.param((2,), (2,), "xy", "xy", id="noop 3d"),
+        pytest.param((2,), (), "xy", "x", id="drop 1 source"),
+        pytest.param((), (2,), "x", "xy", id="insert 1 target"),
+    ],
+)
+def test_project_axis_bound_rejects_ndim_below_highest_index(drops, inserts, source_axes, target_axes):
+    source = _sys_ref("source", source_axes)
+    target = _sys_ref("target", target_axes)
+
+    with pytest.raises(ValueError, match="ProjectAxisTransform requires at least 3"):
+        _ = ProjectAxisTransform(drops=drops, inserts=inserts, source=source, target=target)
+
+
+@pytest.mark.parametrize(
+    "drops,inserts,source_axes,target_axes,expected_err",
+    [
+        ((2,), (2,), "txyz", "txy", "same dimensionality"),
+        ((2,), (2,), "txy", "txyz", "same dimensionality"),
+        ((2,), (), "xyz", "xyz", "target - source ndim = -1"),
+        ((), (2,), "xyz", "xyz", "target - source ndim = 1"),
+    ],
+)
+def test_project_axis_bound_rejects_ndim_delta_mismatch(drops, inserts, source_axes, target_axes, expected_err):
+    source = _sys_ref("source", source_axes)
+    target = _sys_ref("target", target_axes)
+
+    with pytest.raises(ValueError, match=expected_err):
+        _ = ProjectAxisTransform(drops=drops, inserts=inserts, source=source, target=target)
 
 
 @pytest.mark.parametrize(
@@ -1149,7 +1195,7 @@ def test_project_axis_rejects_mismatching_dims():
     source = _sys_ref("source", "cyx")
     bad_target = _sys_ref("target", "yx")
 
-    with pytest.raises(ValueError, match="expects 3 target axes"):
+    with pytest.raises(ValueError, match="source and target must be same dimensionality"):
         ProjectAxisTransform(drops=(0,), inserts=(0,), source=source, target=bad_target)
 
 
@@ -1157,7 +1203,7 @@ def test_project_axis_rejects_create_index_out_of_bounds():
     source = _sys_ref("source", "cyx")
     target = _sys_ref("target", "yxi")
 
-    with pytest.raises(ValueError, match="inserts output index outside target axes"):
+    with pytest.raises(ValueError, match="ProjectAxisTransform requires at least 4 target axes"):
         _ = ProjectAxisTransform(inserts=(2, 3), source=source, target=target)
 
 
@@ -1165,5 +1211,5 @@ def test_project_axis_rejects_drop_index_out_of_bounds():
     source = _sys_ref("source", "cyx")
     target = _sys_ref("target", "yx")
 
-    with pytest.raises(ValueError, match="drops input index outside source axes"):
+    with pytest.raises(ValueError, match="ProjectAxisTransform requires at least 4 source axes"):
         _ = ProjectAxisTransform(drops=(3,), source=source, target=target)
