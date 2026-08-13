@@ -18,8 +18,10 @@ from clearscale._translation_shift import (
     first_value_decimation,
     detect_translation_shift,
 )
+from clearscale._version import __version__
 
 __all__ = [
+    "__version__",
     "BlueprintFactors",
     "BlueprintShapes",
     "DuplicatePolicy",
