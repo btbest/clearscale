@@ -21,7 +21,7 @@ def test_ome_zarr_group_with_no_metadata():
     ome_group = OmeZarrGroup(group)
     assert ome_group.version is None
     assert ome_group.multiscales == ()
-    assert ome_group.scene is None
+    assert ome_group.scenes == ()
     assert ome_group.child_paths == ()
 
 
@@ -39,7 +39,7 @@ def test_ome_zarr_group_ignores_non_mapping_scene(monkeypatch):
     with mock.patch("clearscale.Scene.from_ome_zarr") as scene_construct:
         result = OmeZarrGroup(group)
 
-    assert result.scene is None
+    assert result.scenes == ()
     scene_construct.assert_not_called()
 
 
@@ -48,7 +48,7 @@ def test_ome_zarr_group_ignores_empty_scene_mapping(monkeypatch):
     with mock.patch("clearscale.Scene.from_ome_zarr") as scene_construct:
         result = OmeZarrGroup(group)
 
-    assert result.scene is None
+    assert result.scenes == ()
     scene_construct.assert_not_called()
 
 
@@ -82,7 +82,8 @@ def test_ome_zarr_group_loads_scene(monkeypatch):
     with mock.patch("clearscale.Scene.from_ome_zarr", return_value=scene) as scene_construct:
         result = OmeZarrGroup(group)
 
-    assert result.scene is scene
+    assert len(result.scenes) == 1
+    assert result.scenes[0] is scene
     scene_construct.assert_called_once_with(scene_json)
 
 
@@ -134,7 +135,7 @@ def test_ome_zarr_group_version_ignores_non_mapping_or_non_list_metadata(attrs):
     ome_group = OmeZarrGroup(group)
     assert ome_group.version is None
     assert not ome_group.multiscales
-    assert ome_group.scene is None
+    assert not ome_group.scenes
     assert not ome_group.child_paths
 
 
@@ -332,4 +333,5 @@ def test_ome_zarr_group_uses_scene_version_when_multiscale_version_missing(monke
     result = OmeZarrGroup(group)
 
     assert result.version == "0.5"
-    assert result.scene is scene
+    assert len(result.scenes) == 1
+    assert result.scenes[0] is scene

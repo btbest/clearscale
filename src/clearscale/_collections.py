@@ -68,7 +68,7 @@ class ZarrGroup(ShapeSourceMap, Protocol):
 class OmeZarrGroup:
     version: Optional[str] = None
     multiscales: Tuple[Multiscale, ...] = ()
-    scene: Optional[Scene] = None
+    scenes: Tuple[Scene, ...] = ()
     child_paths: Tuple[str, ...] = ()
     _invalid_objects: Tuple[Dict[str, Any], ...] = ()
 
@@ -109,12 +109,12 @@ class OmeZarrGroup:
                         break
 
         scene_json = ome_attrs.get("scene")
-        scene = None
+        scenes = []
         if scene_json and isinstance(scene_json, ABCMapping):
             try:
-                scene = Scene.from_ome_zarr(scene_json)
+                scenes.append(Scene.from_ome_zarr(scene_json))
             except ValueError:
-                invalid.append(scene)
+                invalid.append(scene_json)
             if not version and isinstance(scene_json.get("version"), str) and scene_json.get("version"):
                 scene_version = scene_json.get("version")
 
@@ -124,6 +124,6 @@ class OmeZarrGroup:
 
         object.__setattr__(self, "version", version)
         object.__setattr__(self, "multiscales", tuple(multiscales))
-        object.__setattr__(self, "scene", scene)
+        object.__setattr__(self, "scenes", tuple(scenes))
         object.__setattr__(self, "child_paths", child_paths)
         object.__setattr__(self, "_invalid_objects", tuple(invalid))

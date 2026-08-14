@@ -62,8 +62,8 @@ def test_ome_zarr_group_parses_scene_stitching_example():
     zarr_group = MockZarrGroup(scene_to_group_attrs(scene_stitching()))
     ome_group = OmeZarrGroup(zarr_group)
 
-    assert ome_group.scene is not None
-    assert ome_group.scene.unresolved_paths == ["tile_0", "tile_1", "tile_2", "tile_3"]
+    assert len(ome_group.scenes) == 1
+    assert ome_group.scenes[0].unresolved_paths == ["tile_0", "tile_1", "tile_2", "tile_3"]
     assert ome_group.version == "0.6.rc0"
 
 
@@ -71,8 +71,8 @@ def test_ome_zarr_group_parses_scene_registration_example():
     zarr_group = MockZarrGroup(scene_to_group_attrs(scene_registration()))
     ome_group = OmeZarrGroup(zarr_group)
 
-    assert ome_group.scene is not None
-    assert ome_group.scene.unresolved_paths == ["JRC2018F", "FCWB"]
+    assert len(ome_group.scenes) == 1
+    assert ome_group.scenes[0].unresolved_paths == ["JRC2018F", "FCWB"]
     assert ome_group.version == "0.6.rc0"
 
 
@@ -81,8 +81,8 @@ def test_ome_zarr_group_parses_scene_public_examples(meta):
     zarr_group = MockZarrGroup(scene_to_group_attrs(meta))
     ome_group = OmeZarrGroup(zarr_group)
 
-    assert ome_group.scene is not None
-    assert isinstance(ome_group.scene, Scene)
+    assert len(ome_group.scenes) == 1
+    assert isinstance(ome_group.scenes[0], Scene)
     assert ome_group.version == "0.6.rc0"
 
 
@@ -91,5 +91,5 @@ def test_ome_zarr_group_ignores_scene_invalid_examples(meta):
     zarr_group = MockZarrGroup(scene_to_group_attrs(meta))
     ome_group = OmeZarrGroup(zarr_group)
 
-    assert ome_group.scene is None
+    assert not ome_group.scenes
     assert ome_group.version == "0.6.rc0"
