@@ -1,6 +1,6 @@
 import copy
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Dict
 
 import pytest
 from clearscale.ome_zarr import SUPPORTED_OME_ZARR_VERSIONS_READ
@@ -18,6 +18,11 @@ class MultiscaleMetadataExample:
     @property
     def expected_paths(self) -> tuple[str, ...]:
         return tuple(dataset["path"] for dataset in self.metadata["datasets"])
+
+    def to_group_attrs(self) -> Dict[str, Any]:
+        if self.id in ("0.1", "0.2", "0.3", "0.4"):
+            return {"multiscales": [self.metadata]}
+        return {"ome": {"version": self.id, "multiscales": [self.metadata]}}
 
 
 ALL_CANONICAL_AXES = [

@@ -1,4 +1,5 @@
 import copy
+from typing import Mapping, Any, Dict
 
 STITCHING = {
     "coordinateTransformations": [
@@ -541,3 +542,12 @@ def all_invalid_scene_examples():
     return [
         copy.deepcopy(ex) for ex in [INVALID_BY_DIMENSION_OUTPUT_OUT_OF_BOUNDS, INVALID_BY_DIMENSION_MISSING_OUTPUTS]
     ]
+
+
+def scene_to_group_attrs(scene_obj: Mapping[str, Any]) -> Dict[str, Any]:
+    return {
+        "ome": {
+            "version": "0.6.rc0",
+            "scene": scene_obj,
+        }
+    }

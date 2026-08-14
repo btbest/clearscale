@@ -3,6 +3,7 @@
 from clearscale import ome_zarr
 from clearscale._affines import Affine, Coefficient, Linear
 from clearscale._axis_values import Factor, PixelOffset, PixelSize, Shape, Translation, Unit
+from clearscale._collections import OmeZarrGroup, ZarrGroup
 from clearscale._multiscale import (
     BlueprintFactors,
     BlueprintShapes,
@@ -28,6 +29,8 @@ __all__ = [
     "Factor",
     "Multiscale",
     "ome_zarr",
+    "OmeZarrGroup",
+    "ZarrGroup",
     "PixelOffset",
     "PixelSize",
     "Scale",

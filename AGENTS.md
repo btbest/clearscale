@@ -9,6 +9,7 @@
 - `services` breaks out static helpers, mostly for `_multiscale.py`. `matrices.py` is for `_transforms` (Rotation, Affine)
 - `_translation_shifts.py` defines public helpers for diagnosing and calculating coordinate offsets introduced by scaling functions (related to `_multiscale.py`)
 - `_scene.py` defines the Scene concept of OME-Zarr 0.6
+- `_collections.py` serves as the primary entrypoint to discover OME-Zarr contents of arbitrary zarr attrs 
 - `ome_zarr.py` lives outside of this hierarchy; it provides user-facing helpers for `Multiscale`
 
 Dependencies should flow only downward in this list.
@@ -53,7 +54,7 @@ Class methods should be ordered from top to bottom like:
 
 ## Naming
 
-- Use immutable-style adverbial and adjectival naming ("with_axes") rather than verbal/action-oriented ("reorder")
+- Use immutable-style descriptive naming ("with_axes") rather than mutable-style imperative ("reorder")
 - Methods on base classes need to be generally named, so their names may be more technical ("with_default"). Subclasses should provide semantically informative and intuitive names for the API consumer that are more specific to the type of value the respective subclass handles ("with_singleton").
 - Use familiar names from core python or popular packages when their functionality is equivalent, but not when it is only similar and could cause unexpected or confusing behaviour
 
