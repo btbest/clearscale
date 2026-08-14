@@ -717,7 +717,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
 
     @staticmethod
     def from_shapes(
-        blueprint: BlueprintShapes,
+        blueprint: Mapping[ScaleKey, ShapeLike],
         *,
         base: Optional[Scale] = None,
         translation_shift_func: Optional[TranslationShiftFunction] = None,

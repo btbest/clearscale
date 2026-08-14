@@ -157,7 +157,7 @@ class Scene:
         )
 
     @classmethod
-    def from_ome_zarr(cls, scene_attrs: Dict[str, Any]) -> "Scene":
+    def from_ome_zarr(cls, scene_attrs: Mapping[str, Any]) -> "Scene":
         # TODO: accept an optional callable get_multiscale_meta;
         #  where the default provided implementation simply chooses
         #  the first entry in the multiscales-array at the path.
