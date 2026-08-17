@@ -23,6 +23,7 @@ from clearscale._transforms import (
     TransformGraph,
     _UnresolvedRef,
     NodeRef,
+    FileRef,
 )
 
 
@@ -53,7 +54,7 @@ def _sys_ref(name, axes):
 
 def test_with_resolved_by_name_does_not_resolve_path_refs():
     world = CoordinateSystem.without_semantics("yx").as_ref("world")
-    original_target = _UnresolvedRef(path="tile_0", name="world")
+    original_target = _UnresolvedRef(file=FileRef(path="tile_0"), name="world")
     transform = TranslationTransform(translation=(0, 0), source=_UnresolvedRef(name="world"), target=original_target)
 
     resolved = transform.with_resolved_by_name((world,))
@@ -114,7 +115,7 @@ def test_resolving_transform_revalidates_endpoint_axes():
     world = _sys_ref("world", "yx")
     transform = TranslationTransform(
         translation=(0, 0),
-        source=_UnresolvedRef(path="tile_0", name="physical"),
+        source=_UnresolvedRef(file=FileRef(path="tile_0"), name="physical"),
         target=world,
     )
 

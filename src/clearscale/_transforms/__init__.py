@@ -3,6 +3,7 @@
 from clearscale._transforms._base import (
     RelativePath,
     CoordinateSystemName,
+    FileRef,
     NodeRef,
     _UnresolvedRef,
     AnyRef,

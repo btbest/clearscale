@@ -1,22 +1,28 @@
 from collections.abc import Mapping as ABCMapping
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Protocol, Tuple
+from typing import Any, Dict, Literal, List, Mapping, Optional, Protocol, Tuple
 
 from clearscale._multiscale import Multiscale
 from clearscale._scene import Scene
+from clearscale._transforms import FileRef
 from clearscale._services.ome_zarr import ShapeSourceMap
 
 
 @dataclass(frozen=True, slots=True)
-class ObjectRef:
-    """Similar to _transforms.NodeRef, but to handle rfc-8 referencing - i.e. relative paths, absolute paths, urls, to zarr objects or to  json files.
-    TODO, not sure whether to keep."""
+class ChildRef:
+    child_type: Literal["label", "well", "multiscale"]
+    file: FileRef
 
-    pass
+    def __post_init__(self):
+        assert self.child_type in ("label", "well", "multiscale")
+
+    @classmethod
+    def from_string(cls, path: str, child_type: Literal["label", "well", "multiscale"]):
+        return cls(file=FileRef.from_string(path), child_type=child_type)
 
 
-def _child_paths_and_version_from_attrs(attrs: Mapping[str, Any]) -> Tuple[Tuple[str, ...], Optional[str]]:
-    paths: List[str] = []
+def _child_paths_and_version_from_attrs(attrs: Mapping[str, Any]) -> Tuple[Tuple[ChildRef, ...], Optional[str]]:
+    children: List[ChildRef] = []
     version: Optional[str] = None
 
     labels = attrs.get("labels")
@@ -26,7 +32,9 @@ def _child_paths_and_version_from_attrs(attrs: Mapping[str, Any]) -> Tuple[Tuple
 
         labels_list = labels.get("labels")
         if isinstance(labels_list, list):
-            paths.extend(path for path in labels_list if isinstance(path, str) and path)
+            children.extend(
+                ChildRef.from_string(path, "label") for path in labels_list if isinstance(path, str) and path
+            )
 
     well = attrs.get("well")
     if isinstance(well, ABCMapping):
@@ -35,8 +43,8 @@ def _child_paths_and_version_from_attrs(attrs: Mapping[str, Any]) -> Tuple[Tuple
 
         images = well.get("images")
         if isinstance(images, list):
-            paths.extend(
-                image["path"]
+            children.extend(
+                ChildRef.from_string(image["path"], "multiscale")
                 for image in images
                 if isinstance(image, ABCMapping) and isinstance(image.get("path"), str) and image.get("path")
             )
@@ -48,13 +56,13 @@ def _child_paths_and_version_from_attrs(attrs: Mapping[str, Any]) -> Tuple[Tuple
 
         wells = plate.get("wells")
         if isinstance(wells, list):
-            paths.extend(
-                well["path"]
+            children.extend(
+                ChildRef.from_string(well["path"], "well")
                 for well in wells
                 if isinstance(well, ABCMapping) and isinstance(well.get("path"), str) and well.get("path")
             )
 
-    return tuple(paths), version
+    return tuple(children), version
 
 
 class ZarrGroup(ShapeSourceMap, Protocol):
@@ -69,7 +77,7 @@ class OmeZarrGroup:
     version: Optional[str] = None
     multiscales: Tuple[Multiscale, ...] = ()
     scenes: Tuple[Scene, ...] = ()
-    child_paths: Tuple[str, ...] = ()
+    children: Tuple[ChildRef, ...] = ()
     _invalid_objects: Tuple[Dict[str, Any], ...] = ()
 
     def __init__(self, group: ZarrGroup, *, shape_source: Optional[ShapeSourceMap] = None):
@@ -118,12 +126,12 @@ class OmeZarrGroup:
             if not version and isinstance(scene_json.get("version"), str) and scene_json.get("version"):
                 scene_version = scene_json.get("version")
 
-        child_paths, child_version = _child_paths_and_version_from_attrs(ome_attrs)
+        children, child_version = _child_paths_and_version_from_attrs(ome_attrs)
 
         version = version or multiscale_version or scene_version or child_version
 
         object.__setattr__(self, "version", version)
         object.__setattr__(self, "multiscales", tuple(multiscales))
         object.__setattr__(self, "scenes", tuple(scenes))
-        object.__setattr__(self, "child_paths", child_paths)
+        object.__setattr__(self, "children", children)
         object.__setattr__(self, "_invalid_objects", tuple(invalid))

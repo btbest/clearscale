@@ -22,7 +22,7 @@ def test_ome_zarr_group_with_no_metadata():
     assert ome_group.version is None
     assert ome_group.multiscales == ()
     assert ome_group.scenes == ()
-    assert ome_group.child_paths == ()
+    assert ome_group.children == ()
 
 
 def test_ome_zarr_group_ignores_non_list_multiscales(monkeypatch):
@@ -105,7 +105,18 @@ def test_ome_zarr_group_collects_labels_well_and_plate_paths_in_order():
     }
     group = MockZarrGroup(attrs)
     ome_group = OmeZarrGroup(group)
-    assert ome_group.child_paths == (
+    assert len(ome_group.children) > 0
+    assert tuple(c.child_type for c in ome_group.children) == (
+        "label",
+        "label",
+        "multiscale",
+        "multiscale",
+        "well",
+        "well",
+    )
+    assert all(c.file.kind == "zarr" for c in ome_group.children)
+    paths = tuple(c.file.path for c in ome_group.children)
+    assert paths == (
         "label-0",
         "label-1",
         "image-0",
@@ -136,7 +147,7 @@ def test_ome_zarr_group_version_ignores_non_mapping_or_non_list_metadata(attrs):
     assert ome_group.version is None
     assert not ome_group.multiscales
     assert not ome_group.scenes
-    assert not ome_group.child_paths
+    assert not ome_group.children
 
 
 def test_ome_zarr_group_labels_list_only_accepts_strings():
@@ -154,7 +165,11 @@ def test_ome_zarr_group_labels_list_only_accepts_strings():
     }
     group = MockZarrGroup(attrs)
     ome_group = OmeZarrGroup(group)
-    assert ome_group.child_paths == ("nuclei", "cytoplasm")
+    assert len(ome_group.children) > 0
+    assert tuple(c.child_type for c in ome_group.children) == ("label", "label")
+    assert all(c.file.kind == "zarr" for c in ome_group.children)
+    paths = tuple(c.file.path for c in ome_group.children)
+    assert paths == ("nuclei", "cytoplasm")
 
 
 def test_ome_zarr_group_well_images_only_accept_mapping_entries_with_string_path():
@@ -172,7 +187,11 @@ def test_ome_zarr_group_well_images_only_accept_mapping_entries_with_string_path
     }
     group = MockZarrGroup(attrs)
     ome_group = OmeZarrGroup(group)
-    assert ome_group.child_paths == ("image-0",)
+    assert len(ome_group.children) > 0
+    assert tuple(c.child_type for c in ome_group.children) == ("multiscale",)
+    assert all(c.file.kind == "zarr" for c in ome_group.children)
+    paths = tuple(c.file.path for c in ome_group.children)
+    assert paths == ("image-0",)
 
 
 def test_ome_zarr_group_plate_wells_only_accept_mapping_entries_with_string_path():
@@ -190,7 +209,11 @@ def test_ome_zarr_group_plate_wells_only_accept_mapping_entries_with_string_path
     }
     group = MockZarrGroup(attrs)
     ome_group = OmeZarrGroup(group)
-    assert ome_group.child_paths == ("A/1",)
+    assert len(ome_group.children) > 0
+    assert tuple(c.child_type for c in ome_group.children) == ("well",)
+    assert all(c.file.kind == "zarr" for c in ome_group.children)
+    paths = tuple(c.file.path for c in ome_group.children)
+    assert paths == ("A/1",)
 
 
 def test_ome_zarr_group_prefers_top_level_version():

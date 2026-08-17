@@ -13,6 +13,7 @@ from clearscale._transforms import (
     ScaleTransform,
     TranslationTransform,
     TransformGraph,
+    FileRef,
     NodeRef,
     CoordinateSystem,
     _UnresolvedRef,
@@ -493,7 +494,7 @@ def build_dataset_dict(
     if version in PRE_TRANSFORMS_VERSIONS:
         dataset_transforms = [t.to_ome_zarr(version) for t in components]
     else:
-        dataset_path = _UnresolvedRef(name=None, path=str(key))
+        dataset_path = _UnresolvedRef(name=None, file=FileRef.from_string(str(key)))
         # The "single transform inside a list" requirement of 0.6 actually makes this more awkward
         single_t = TransformSequence(components) if len(components) > 1 else components[0]
         single_dict = single_t.bound(source=dataset_path, target=intrinsic_ref).to_ome_zarr(version)

@@ -9,6 +9,7 @@ from clearscale._transforms import (
     ScaleTransform,
     AffineTransform,
     NodeRef,
+    FileRef,
 )
 
 
@@ -162,7 +163,7 @@ def test_transforms_between_accepts_path_addressed_unresolved_refs():
     world = CoordinateSystem.without_semantics("yx").as_ref("world")
     transform = TranslationTransform(
         translation=(1, 2),
-        source=_UnresolvedRef(path="tile_0", name="physical"),
+        source=_UnresolvedRef(file=FileRef(path="tile_0"), name="physical"),
         target=world,
     )
     scene = Scene(TransformGraph([transform], system_refs=(world,)), _multiscale_paths={})

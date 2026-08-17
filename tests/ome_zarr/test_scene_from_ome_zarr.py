@@ -1,7 +1,7 @@
 import pytest
 
 from clearscale import Scene, Multiscale, Scale, Shape
-from clearscale._transforms import CoordinateSystem, TranslationTransform, _UnresolvedRef, TransformGraph
+from clearscale._transforms import CoordinateSystem, TranslationTransform, _UnresolvedRef, TransformGraph, FileRef
 
 from tests.ome_zarr.scene_examples import (
     all_invalid_scene_examples,
@@ -93,7 +93,7 @@ def test_with_resolved_does_not_resolve_by_name():
     transform = TranslationTransform(
         translation=(0, 0),
         source=_UnresolvedRef(name="world"),
-        target=_UnresolvedRef(path="tile_0", name="physical"),
+        target=_UnresolvedRef(file=FileRef(path="tile_0"), name="physical"),
     )
     scene = Scene(TransformGraph([transform], system_refs=(world,)), _multiscale_paths={})
     resolved = scene.with_resolved({"tile_0": multiscale})

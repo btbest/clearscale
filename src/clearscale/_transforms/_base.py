@@ -39,6 +39,7 @@ _TransformSequenceSelf = TypeVar("_TransformSequenceSelf", bound="TransformSeque
 _RefT = TypeVar("_RefT")
 
 PRE_TRANSFORMS_VERSIONS = ("0.1", "0.2", "0.3", "0.4", "0.5")
+PRE_COLLECTIONS_VERSIONS = PRE_TRANSFORMS_VERSIONS + ("0.6.rc0",)
 
 
 class CoordinateContinuity(str, enum.Enum):
@@ -97,6 +98,52 @@ class TransformGraphNode(ABC):
 
 
 @dataclass(frozen=True, slots=True)
+class FileRef:
+    """Just a path, but with the ability to answer 'What kind of path?'"""
+
+    path: str
+    """
+    Path could be:
+    - a relative URI like 'scales/s0' in OME-Zarr versions up to 0.6 (before RFC-8)
+    - an absolute URI like 'https://...' or 'file:///C:/...'
+    - a relative path like './scales/s0' or '../'
+    """
+    kind: Literal["zarr", "json"] = "zarr"
+    """
+    'zarr': The path points to a zarr object that should be opened like 'zarr.open(path)'.
+    'json': The path points to a file that should be read like 'json.loads(path)'.
+    """
+
+    def __post_init__(self):
+        assert self.kind in ("zarr", "json")
+        if not isinstance(self.path, str) or not self.path:
+            raise ValueError(f"Path must be string: {self.path}")
+
+    @classmethod
+    def from_string(cls, path: str):
+        """Constructor that infers `kind` from the provided path"""
+        assert path and isinstance(path, str), f"Must call with string, received: {path!r}"
+        return cls(kind="json" if path.endswith(".json") else "zarr", path=path)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "FileRef":
+        kind = value.get("type")
+        if kind not in ("zarr", "json"):
+            raise ValueError(f"Invalid file reference type: {kind!r}")
+        path = value.get("path")
+        if not isinstance(path, str):
+            raise ValueError(f"Invalid file reference path: {path!r}")
+        return cls(kind=kind, path=path)
+
+    def to_ome_zarr(self, version: str = "rfc-8") -> Union[str, Dict[str, str]]:
+        if version in PRE_COLLECTIONS_VERSIONS:
+            if self.kind != "zarr":
+                raise ValueError(f"OME-Zarr version {version} can only reference zarr paths.")
+            return self.path
+        return {"type": self.kind, "path": self.path}
+
+
+@dataclass(frozen=True, slots=True)
 class NodeRef(Generic[TransformGraphNodeT]):
     """
     Essentially a fancy tuple to act like dict-keys for selecting nodes inside transform graphs.
@@ -124,9 +171,9 @@ class NodeRef(Generic[TransformGraphNodeT]):
     def __hash__(self):
         return hash((type(self), self.name, id(self.owner)))
 
-    def to_ome_zarr(self, path: Optional[RelativePath] = None) -> Dict[str, str]:
-        if path:
-            return {"name": self.name, "path": path}
+    def to_ome_zarr(self, version: str = "0.6.rc0", path: Optional[str] = None) -> Dict[str, Any]:
+        if path and isinstance(path, str):
+            return {"name": self.name, "path": FileRef.from_string(path).to_ome_zarr(version)}
         return {"name": self.name}
 
 
@@ -139,16 +186,16 @@ class _UnresolvedRef:
     name: Optional[CoordinateSystemName]
     """name is required. Optional only to acommodate one specific case inside OME-Zarr 0.6
     dataset['coordinateTransformations'][]['input'], where name must be null/omitted."""
-    path: Optional[RelativePath] = None
+    file: Optional[FileRef] = None
 
     def __post_init__(self):
-        if not self.name and not self.path:
+        if not self.name and not self.file:
             raise ValueError("_UnresolvedRef requires at least one of: name, path")
 
-    def to_ome_zarr(self, path: Optional[RelativePath] = None) -> Dict[str, str]:
+    def to_ome_zarr(self, version: str = "0.6.rc0", path: Optional[FileRef] = None) -> Dict[str, Any]:
         d = {}
-        if self.path:
-            d["path"] = self.path
+        if self.file is not None:
+            d["path"] = self.file.to_ome_zarr(version)
         if self.name:
             d["name"] = self.name
         return d
@@ -395,19 +442,19 @@ class Transform(ABC):
 
     @staticmethod
     def _resolve_ref_by_path(ref: Optional[AnyRef], path_nodes: NodesByPath) -> Optional[AnyRef]:
-        if not isinstance(ref, _UnresolvedRef) or not ref.path:
+        if not isinstance(ref, _UnresolvedRef) or ref.file is None:
             return ref
-        new_node = path_nodes.get(ref.path)
+        new_node = path_nodes.get(ref.file.path)
         if new_node is not None and ref.name is not None:
             try:
                 return new_node.as_ref(ref.name)
             except NoSuchCoordinateSystemError:
-                raise MismatchingMultiscaleError(path=ref.path, name=ref.name)
+                raise MismatchingMultiscaleError(path=ref.file.path, name=ref.name)
         return ref
 
     @staticmethod
     def _resolve_ref_by_name(ref: Optional[AnyRef], named_refs: Iterable[NodeRef]) -> Optional[AnyRef]:
-        if not isinstance(ref, _UnresolvedRef) or not ref.name or ref.path:
+        if not isinstance(ref, _UnresolvedRef) or not ref.name or ref.file is not None:
             return ref
         name_matches = [other for other in named_refs if other.name == ref.name]
         if len(name_matches) > 1:
@@ -491,11 +538,15 @@ class Transform(ABC):
             if not isinstance(ref, dict):
                 raise ValueError(f"Invalid transform endpoint metadata. Received: {ome_dict!r}")
             path = ref.get("path")
+            file = None
             name = ref.get("name")
-            path = path if isinstance(path, str) else None
+            if isinstance(path, MappingABC):
+                file = FileRef.from_dict(path)
+            elif isinstance(path, str):
+                file = FileRef.from_string(path)
             name = name if isinstance(name, str) else None
-            if path or name:
-                endpoints[side] = _UnresolvedRef(path=path, name=name)
+            if file or name:
+                endpoints[side] = _UnresolvedRef(file=file, name=name)
         if bool(endpoints["input"]) != bool(endpoints["output"]):
             raise ValueError(f"Invalid transform (in/out must either both be undefined or both defined): {ome_dict!r}")
         source = endpoints["input"]
