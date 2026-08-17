@@ -4,7 +4,7 @@ import re
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Union, Dict, List, Any, Optional, Tuple, Protocol, Iterable, TYPE_CHECKING
+from typing import Union, Dict, Literal, List, Any, Optional, Tuple, Protocol, Iterable, TYPE_CHECKING
 
 from clearscale._axis_values import ShapeLike, Translation, PixelSize, AxisKey
 from clearscale._transforms import (
@@ -75,13 +75,37 @@ class ShapeSourceMap(Protocol):
     def __getitem__(self, path: str, /) -> ShapeValue: ...
 
 
-ShapeSource = Union[Callable[[str], ShapeValue], ShapeSourceMap]
+ShapeSource = Union[Literal["singletons"], Callable[[str], ShapeValue], ShapeSourceMap]
 """
 Lets clearscale know how to obtain a zarr's array shape in this Python environment.
+Options:
+- "singletons": Skip obtaining shapes and use placeholder all-singleton shapes (like `Shape(x=1, y=1, z=1)`)
+    This sets `Multiscale.has_shapes = False` as a convenience indicator.
+- Callable: A function that takes a relative path that *should* point to an array, and retrieves its shape tuple
+    Example: zarr.open_array
+- Map: A dict-like that can be indexed to retrieve shapes like `{ <relative path> : <shape tuple or array> }`
+    Example: zarr.Group or fsspec.FSMap
 """
 
 
-def normalize_shape_source_to_callable(shape_source: ShapeSource) -> GetShapeFunction:
+def make_all_singleton_shapes(ndim_or_spec: Union[int, OME_ZARR_MULTISCALE]) -> GetShapeFunction:
+    """
+    Construct OME-Zarr Multiscale without accessing data arrays, avoiding potentially dozens of requests.
+    `Multiscale.from_ome_zarr(ome_ms_dict, shape_source=make_all_singleton_shapes(3))`
+    `Multiscale.from_ome_zarr(ome_ms_dict, shape_source=make_all_singleton_shapes(ome_ms_dict))`
+    """
+    if isinstance(ndim_or_spec, int):
+        return lambda _: (1,) * ndim_or_spec
+    else:
+        ndim = len(ndim_or_spec.get("axes", [])) or 5  # OME-Zarr 0.1 and 0.2 without axes
+        return lambda _: (1,) * ndim
+
+
+def normalize_shape_source_to_callable(
+    shape_source: ShapeSource, multiscale_dict: OME_ZARR_MULTISCALE
+) -> GetShapeFunction:
+    if shape_source == "singletons":
+        return make_all_singleton_shapes(multiscale_dict)
     if isinstance(shape_source, (str, bytes)):
         raise TypeError(
             f"Cannot obtain array shape from plain path. Received: {shape_source!r}."

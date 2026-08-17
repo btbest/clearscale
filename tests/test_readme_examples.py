@@ -1,7 +1,6 @@
 from unittest.mock import Mock, MagicMock
 
 from clearscale import Shape, PixelSize, Unit, Scale, BlueprintShapes, Multiscale
-from clearscale.ome_zarr import make_proportional_shapes
 
 
 def test_downscale_2_example():
@@ -180,7 +179,7 @@ def test_extract_single_scale_example():
     local_array = local_group.create_array(SCALE_KEY, data=source_array, overwrite=True)
 
     # 3. Extract the correct scale metadata and upgrade it to valid independent metadata
-    source_multiscale = Multiscale.from_ome_zarr(ome_multiscale, shape_source=make_proportional_shapes(ome_multiscale))
+    source_multiscale = Multiscale.from_ome_zarr(ome_multiscale, shape_source="singletons")
     extracted_scale = source_multiscale[SCALE_KEY]
     target_multiscale = Multiscale({SCALE_KEY: extracted_scale})
 

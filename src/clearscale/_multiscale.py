@@ -666,6 +666,8 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
     """The system in which the Scales' shape, pixel size, translation etc. are correct."""
     _zero_scale_axes_by_key: Mapping[str, Tuple[AxisKey, ...]]
     """Dataset scale axes that were read as 0.0 from loaded meta; kept for as-read round-trip."""
+    has_shapes: bool
+    """If False, this indicates the Multiscale was generated with fake (all-singleton) shapes."""
 
     def __init__(
         self,
@@ -673,6 +675,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         _transform_graph: Optional[TransformGraph] = None,
         _intrinsic_ref: Optional[NodeRef[CoordinateSystem]] = None,
         _zero_scale_axes_by_key: Optional[Mapping[str, Tuple[AxisKey, ...]]] = None,
+        has_shapes=True,
         **kwargs,
     ):
         """
@@ -708,6 +711,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
                 if kept_axes:
                     zero_scale_axes_by_key[key] = kept_axes
         self._zero_scale_axes_by_key = zero_scale_axes_by_key
+        self.has_shapes = has_shapes
 
     def __eq__(self, other):
         return _ScaleMapping.__eq__(self, other)
@@ -738,7 +742,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         shape_source: ome_zarr.ShapeSource,
     ):
         ome_zarr.require_dataset_paths(multiscale_dict)
-        get_shape = ome_zarr.normalize_shape_source_to_callable(shape_source)
+        get_shape = ome_zarr.normalize_shape_source_to_callable(shape_source, multiscale_dict)
         try:
             transform_graph, intrinsic_system_ref = ome_zarr.extract_multiscale_graph(multiscale_dict)
             global_transforms = None
@@ -778,6 +782,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             _transform_graph=transform_graph,
             _intrinsic_ref=intrinsic_system_ref,
             _zero_scale_axes_by_key=zero_scale_axes_by_key,
+            has_shapes=shape_source != "singletons",
         )
 
     @classmethod

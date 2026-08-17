@@ -1,7 +1,7 @@
 import pytest
 
 from clearscale import Multiscale, PixelSize, Shape, Scale
-from clearscale.ome_zarr import make_all_singleton_shapes, make_proportional_shapes, SUPPORTED_OME_ZARR_VERSIONS_READ
+from clearscale.ome_zarr import make_all_singleton_shapes, SUPPORTED_OME_ZARR_VERSIONS_READ
 
 from tests.ome_zarr.multiscale_examples import (
     MultiscaleMetadataExample,
@@ -18,6 +18,13 @@ def test_all_versions_covered():
     assert set(versions) == set(
         SUPPORTED_OME_ZARR_VERSIONS_READ
     ), "Add at least a minimal test example when adding support for new OME-Zarr versions"
+
+
+def test_requires_shape_source_param():
+    """We want call sites to explicitly say `shape_source=None` if they manufacture Multiscales with fake shapes."""
+    minimal_meta = {"datasets": [{"path": "s0"}]}
+    with pytest.raises(TypeError, match="missing 1 required keyword-only argument: 'shape_source'"):
+        _ = Multiscale.from_ome_zarr(minimal_meta)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("example", minimal_multiscale_examples_params())
@@ -391,7 +398,7 @@ def test_from_ome_zarr_normalizes_zero_scale_values():
     assert multiscale["s0"].pixel_size == PixelSize(c=1.0, y=1.0, x=1.0)
 
 
-def test_from_ome_zarr_normalizes_zero_scale_values_with_proportional_shape_source():
+def test_from_ome_zarr_normalizes_zero_scale_values_with_singleton_shape_source():
     metadata = {
         "axes": [{"name": "c"}, {"name": "y"}, {"name": "x"}],
         "datasets": [
@@ -400,8 +407,9 @@ def test_from_ome_zarr_normalizes_zero_scale_values_with_proportional_shape_sour
         ],
     }
 
-    multiscale = Multiscale.from_ome_zarr(metadata, shape_source=make_proportional_shapes(metadata))
+    multiscale = Multiscale.from_ome_zarr(metadata, shape_source="singletons")
 
+    assert not multiscale.has_shapes
     assert tuple(multiscale.keys()) == ("s0", "s1")
     assert multiscale["s0"].pixel_size == PixelSize(c=1.0, y=1.0, x=1.0)
     assert multiscale["s1"].pixel_size == PixelSize(c=1.0, y=2.0, x=2.0)
