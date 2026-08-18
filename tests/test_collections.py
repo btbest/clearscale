@@ -102,13 +102,14 @@ def test_ome_zarr_group_ignores_legacy_keys_when_ome_present(monkeypatch):
 def test_ome_zarr_group_loads_scene(monkeypatch):
     scene_json = {"name": "test-scene"}
     group = MockZarrGroup(attrs={"ome": {"scene": scene_json}})
-    scene = object()
+    scene = mock.Mock(unresolved_paths=["path1", "path2"])
     with mock.patch("clearscale.Scene.from_ome_zarr", return_value=scene) as scene_construct:
         result = OmeZarrGroup.from_group(group)
 
     assert result.kind is GroupKind.SCENE
     assert len(result.scenes) == 1
     assert result.scenes[0] is scene
+    assert [child.file.path for child in result.children] == ["path1", "path2"]
     scene_construct.assert_called_once_with(scene_json)
 
 

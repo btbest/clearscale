@@ -13,13 +13,13 @@ class GroupKind(str, Enum):
     MULTISCALE = "multiscale"
     """Exactly one valid Multiscale"""
     SCENE = "scene"
-    """Exactly one valid Scene"""
+    """Exactly one valid Scene and zero or more children. Children are multiscales"""
     PLATE = "plate"
     """One or more children. Children are wells"""
     WELL = "well"
     """One or more children. Children are multiscales"""
     LABELS = "labels"
-    """One or more children. Children are multiscales"""
+    """One or more children. Children are (label) multiscales"""
     COLLECTION = "collection"
     """Any combination or multiple of the above"""
 
@@ -93,6 +93,8 @@ class OmeZarrGroup:
     multiscales: Tuple[Multiscale, ...] = ()
     scenes: Tuple[Scene, ...] = ()
     children: Tuple[ChildRef, ...] = ()
+    """Contains *all* references to other OME-Zarr objects mentioned in this group's metadata.
+    This includes references to wells, label-multiscales, and multiscales contained in wells or scenes."""
     _invalid_objects: Tuple[Dict[str, Any], ...] = ()
 
     def __post_init__(self):
@@ -136,9 +138,12 @@ class OmeZarrGroup:
 
         scene_json = ome_attrs.get("scene")
         scenes = []
+        scene_children = []
         if scene_json and isinstance(scene_json, ABCMapping):
             try:
-                scenes.append(Scene.from_ome_zarr(scene_json))
+                scene = Scene.from_ome_zarr(scene_json)
+                scenes.append(scene)
+                scene_children.extend(ChildRef.from_string(path, "multiscale") for path in scene.unresolved_paths)
                 group_kind = GroupKind.SCENE if group_kind is None else GroupKind.COLLECTION
             except ValueError:
                 invalid.append(scene_json)
@@ -155,7 +160,7 @@ class OmeZarrGroup:
             version=version,
             multiscales=tuple(multiscales),
             scenes=tuple(scenes),
-            children=children,
+            children=children + tuple(scene_children),
             _invalid_objects=tuple(invalid),
         )
 

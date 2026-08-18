@@ -64,10 +64,12 @@ def test_ome_zarr_group_ignores_invalid_multiscale():
 def test_ome_zarr_group_parses_scene_stitching_example():
     zarr_group = MockZarrGroup(scene_to_group_attrs(scene_stitching()))
     ome_group = OmeZarrGroup.from_group(zarr_group)
+    expected_paths = ["tile_0", "tile_1", "tile_2", "tile_3"]
 
     assert ome_group.kind is GroupKind.SCENE
     assert len(ome_group.scenes) == 1
-    assert ome_group.scenes[0].unresolved_paths == ["tile_0", "tile_1", "tile_2", "tile_3"]
+    assert ome_group.scenes[0].unresolved_paths == expected_paths
+    assert [child.file.path for child in ome_group.children] == expected_paths
     assert ome_group.version == "0.6.rc0"
 
 
@@ -78,6 +80,7 @@ def test_ome_zarr_group_parses_scene_registration_example():
     assert ome_group.kind is GroupKind.SCENE
     assert len(ome_group.scenes) == 1
     assert ome_group.scenes[0].unresolved_paths == ["JRC2018F", "FCWB"]
+    assert [child.file.path for child in ome_group.children] == ["JRC2018F", "FCWB"]
     assert ome_group.version == "0.6.rc0"
 
 
