@@ -4,7 +4,61 @@ from unittest.mock import Mock
 import pytest
 
 from clearscale import Multiscale, Scene
-from clearscale._collections import OmeZarrGroup, GroupKind
+from clearscale._collections import OmeZarrGroup, GroupKind, ChildRef
+
+
+@pytest.mark.parametrize(
+    "kwargs, expected_kind",
+    [
+        pytest.param({}, None, id="empty"),
+        pytest.param({"multiscales": (Mock(),)}, GroupKind.MULTISCALE, id="single-multiscale"),
+        pytest.param({"multiscales": (Mock(), Mock())}, GroupKind.COLLECTION, id="multiple-multiscales"),
+        pytest.param({"scenes": (Mock(),)}, GroupKind.SCENE, id="scene-without-children"),
+        pytest.param(
+            {"scenes": (Mock(),), "children": (ChildRef("multiscale", Mock()), ChildRef("multiscale", Mock()))},
+            GroupKind.SCENE,
+            id="scene-with-multiscale-children",
+        ),
+        pytest.param({"children": (ChildRef("well", Mock()),)}, GroupKind.PLATE, id="plate"),
+        pytest.param(
+            {"children": (ChildRef("well", Mock()), ChildRef("well", Mock()))},
+            GroupKind.PLATE,
+            id="plate-multiple-wells",
+        ),
+        pytest.param({"children": (ChildRef("multiscale", Mock()),)}, GroupKind.WELL, id="well"),
+        pytest.param(
+            {"children": (ChildRef("multiscale", Mock()), ChildRef("multiscale", Mock()))},
+            GroupKind.WELL,
+            id="well-multiple-multiscales",
+        ),
+        pytest.param({"children": (ChildRef("label", Mock()),)}, GroupKind.LABELS, id="labels"),
+        pytest.param(
+            {"children": (ChildRef("label", Mock()), ChildRef("label", Mock()))},
+            GroupKind.LABELS,
+            id="labels-multiple-labels",
+        ),
+        pytest.param({"multiscales": (Mock(),), "scenes": (Mock(),)}, GroupKind.COLLECTION, id="multiscale-and-scene"),
+        pytest.param(
+            {"multiscales": (Mock(), Mock()), "children": (ChildRef("multiscale", Mock()),)},
+            GroupKind.COLLECTION,
+            id="multiscales-and-children",
+        ),
+        pytest.param({"scenes": (Mock(), Mock())}, GroupKind.COLLECTION, id="multiple-scenes"),
+        pytest.param(
+            {"scenes": (Mock(),), "children": (ChildRef("well", Mock()),)},
+            GroupKind.COLLECTION,
+            id="scene-with-non-multiscale-child",
+        ),
+        pytest.param(
+            {"children": (ChildRef("well", Mock()), ChildRef("multiscale", Mock()))},
+            GroupKind.COLLECTION,
+            id="mixed-child-types",
+        ),
+    ],
+)
+def test_ome_zarr_group_init_detects_group_kind(kwargs, expected_kind):
+    group = OmeZarrGroup(**kwargs)
+    assert group.kind is expected_kind
 
 
 class MockZarrGroup:
