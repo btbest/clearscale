@@ -1,6 +1,6 @@
 import pytest
 from clearscale._scene import Scene
-from clearscale._collections import OmeZarrGroup
+from clearscale._collections import OmeZarrGroup, GroupKind
 from clearscale.ome_zarr import make_all_singleton_shapes
 
 from tests.ome_zarr.multiscale_examples import (
@@ -33,6 +33,7 @@ def test_ome_zarr_group_parses_minimal_multiscale_examples(example: MultiscaleMe
     zarr_group = MockZarrGroup(example.to_group_attrs(), make_all_singleton_shapes(example.ndim))
     ome_group = OmeZarrGroup.from_group(zarr_group)
 
+    assert ome_group.kind is GroupKind.MULTISCALE
     assert len(ome_group.multiscales) == 1
     assert tuple(ome_group.multiscales[0].keys()) == example.expected_paths
     if "version" in example.metadata:
@@ -44,6 +45,7 @@ def test_ome_zarr_group_parses_maximal_multiscale_examples(example: MultiscaleMe
     zarr_group = MockZarrGroup(example.to_group_attrs(), make_all_singleton_shapes(example.ndim))
     ome_group = OmeZarrGroup.from_group(zarr_group)
 
+    assert ome_group.kind is GroupKind.MULTISCALE
     assert len(ome_group.multiscales) == 1
     assert tuple(ome_group.multiscales[0].keys()) == example.expected_paths
     assert ome_group.version == example.id
@@ -54,6 +56,7 @@ def test_ome_zarr_group_ignores_invalid_multiscale():
     zarr_group = MockZarrGroup(invalid_meta, make_all_singleton_shapes(1))
     ome_group = OmeZarrGroup.from_group(zarr_group)
 
+    assert ome_group.kind is None
     assert len(ome_group.multiscales) == 0
     assert ome_group.version is None
 
@@ -62,6 +65,7 @@ def test_ome_zarr_group_parses_scene_stitching_example():
     zarr_group = MockZarrGroup(scene_to_group_attrs(scene_stitching()))
     ome_group = OmeZarrGroup.from_group(zarr_group)
 
+    assert ome_group.kind is GroupKind.SCENE
     assert len(ome_group.scenes) == 1
     assert ome_group.scenes[0].unresolved_paths == ["tile_0", "tile_1", "tile_2", "tile_3"]
     assert ome_group.version == "0.6.rc0"
@@ -71,6 +75,7 @@ def test_ome_zarr_group_parses_scene_registration_example():
     zarr_group = MockZarrGroup(scene_to_group_attrs(scene_registration()))
     ome_group = OmeZarrGroup.from_group(zarr_group)
 
+    assert ome_group.kind is GroupKind.SCENE
     assert len(ome_group.scenes) == 1
     assert ome_group.scenes[0].unresolved_paths == ["JRC2018F", "FCWB"]
     assert ome_group.version == "0.6.rc0"
@@ -81,6 +86,7 @@ def test_ome_zarr_group_parses_scene_public_examples(meta):
     zarr_group = MockZarrGroup(scene_to_group_attrs(meta))
     ome_group = OmeZarrGroup.from_group(zarr_group)
 
+    assert ome_group.kind is GroupKind.SCENE
     assert len(ome_group.scenes) == 1
     assert isinstance(ome_group.scenes[0], Scene)
     assert ome_group.version == "0.6.rc0"
@@ -91,5 +97,6 @@ def test_ome_zarr_group_ignores_scene_invalid_examples(meta):
     zarr_group = MockZarrGroup(scene_to_group_attrs(meta))
     ome_group = OmeZarrGroup.from_group(zarr_group)
 
+    assert ome_group.kind is None
     assert not ome_group.scenes
     assert ome_group.version == "0.6.rc0"

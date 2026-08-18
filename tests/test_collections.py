@@ -4,7 +4,7 @@ from unittest.mock import Mock
 import pytest
 
 from clearscale import Multiscale, Scene
-from clearscale._collections import OmeZarrGroup
+from clearscale._collections import OmeZarrGroup, GroupKind
 
 
 class MockZarrGroup:
@@ -19,6 +19,7 @@ class MockZarrGroup:
 def test_ome_zarr_group_with_no_metadata():
     group = MockZarrGroup()
     ome_group = OmeZarrGroup.from_group(group)
+    assert ome_group.kind is None
     assert ome_group.version is None
     assert ome_group.multiscales == ()
     assert ome_group.scenes == ()
@@ -30,6 +31,7 @@ def test_ome_zarr_group_ignores_non_list_multiscales(monkeypatch):
     with mock.patch("clearscale.Multiscale.from_ome_zarr") as multiscale_construct:
         result = OmeZarrGroup.from_group(group)
 
+    assert result.kind is None
     assert not result.multiscales
     multiscale_construct.assert_not_called()
 
@@ -39,6 +41,7 @@ def test_ome_zarr_group_ignores_non_mapping_scene(monkeypatch):
     with mock.patch("clearscale.Scene.from_ome_zarr") as scene_construct:
         result = OmeZarrGroup.from_group(group)
 
+    assert result.kind is None
     assert result.scenes == ()
     scene_construct.assert_not_called()
 
@@ -48,6 +51,7 @@ def test_ome_zarr_group_ignores_empty_scene_mapping(monkeypatch):
     with mock.patch("clearscale.Scene.from_ome_zarr") as scene_construct:
         result = OmeZarrGroup.from_group(group)
 
+    assert result.kind is None
     assert result.scenes == ()
     scene_construct.assert_not_called()
 
@@ -67,6 +71,7 @@ def test_ome_zarr_group_loads_multiscales_in_order(monkeypatch):
     ) as multiscale_construct:
         result = OmeZarrGroup.from_group(group)
 
+    assert result.kind is GroupKind.COLLECTION
     assert multiscale_construct.call_args_list == [
         ((multiscale_jsons[0],), {"shape_source": group}),
         ((multiscale_jsons[1],), {"shape_source": group}),
@@ -90,6 +95,7 @@ def test_ome_zarr_group_ignores_legacy_keys_when_ome_present(monkeypatch):
         result = OmeZarrGroup.from_group(group)
 
     multiscale_construct.assert_called_once_with(ome_ms_json, shape_source=group)
+    assert result.kind is GroupKind.MULTISCALE
     assert result.multiscales == (ome_ms,)
 
 
@@ -100,6 +106,7 @@ def test_ome_zarr_group_loads_scene(monkeypatch):
     with mock.patch("clearscale.Scene.from_ome_zarr", return_value=scene) as scene_construct:
         result = OmeZarrGroup.from_group(group)
 
+    assert result.kind is GroupKind.SCENE
     assert len(result.scenes) == 1
     assert result.scenes[0] is scene
     scene_construct.assert_called_once_with(scene_json)
@@ -123,6 +130,7 @@ def test_ome_zarr_group_collects_labels_well_and_plate_paths_in_order():
     }
     group = MockZarrGroup(attrs)
     ome_group = OmeZarrGroup.from_group(group)
+    assert ome_group.kind is GroupKind.COLLECTION
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == (
         "label",
@@ -170,6 +178,7 @@ def test_ome_zarr_group_collects_labels_well_and_plate_paths_in_order():
 def test_ome_zarr_group_version_ignores_non_mapping_or_non_list_metadata(attrs):
     group = MockZarrGroup(attrs)
     ome_group = OmeZarrGroup.from_group(group)
+    assert ome_group.kind is None
     assert ome_group.version is None
     assert not ome_group.multiscales
     assert not ome_group.scenes
@@ -189,6 +198,7 @@ def test_ome_zarr_group_labels_list_only_accepts_strings():
     }
     group = MockZarrGroup(attrs)
     ome_group = OmeZarrGroup.from_group(group)
+    assert ome_group.kind is GroupKind.LABELS
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == ("label", "label")
     assert all(c.file.kind == "zarr" for c in ome_group.children)
@@ -211,6 +221,7 @@ def test_ome_zarr_group_labels_list_only_accepts_strings_under_ome():
     }
     group = MockZarrGroup(attrs)
     ome_group = OmeZarrGroup.from_group(group)
+    assert ome_group.kind is GroupKind.LABELS
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == ("label", "label")
     assert all(c.file.kind == "zarr" for c in ome_group.children)
@@ -233,6 +244,7 @@ def test_ome_zarr_group_well_images_only_accept_mapping_entries_with_string_path
     }
     group = MockZarrGroup(attrs)
     ome_group = OmeZarrGroup.from_group(group)
+    assert ome_group.kind is GroupKind.WELL
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == ("multiscale",)
     assert all(c.file.kind == "zarr" for c in ome_group.children)
@@ -257,6 +269,7 @@ def test_ome_zarr_group_well_images_only_accept_mapping_entries_with_string_path
     }
     group = MockZarrGroup(attrs)
     ome_group = OmeZarrGroup.from_group(group)
+    assert ome_group.kind is GroupKind.WELL
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == ("multiscale",)
     assert all(c.file.kind == "zarr" for c in ome_group.children)
@@ -279,6 +292,7 @@ def test_ome_zarr_group_plate_wells_only_accept_mapping_entries_with_string_path
     }
     group = MockZarrGroup(attrs)
     ome_group = OmeZarrGroup.from_group(group)
+    assert ome_group.kind is GroupKind.PLATE
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == ("well",)
     assert all(c.file.kind == "zarr" for c in ome_group.children)
@@ -303,6 +317,7 @@ def test_ome_zarr_group_plate_wells_only_accept_mapping_entries_with_string_path
     }
     group = MockZarrGroup(attrs)
     ome_group = OmeZarrGroup.from_group(group)
+    assert ome_group.kind is GroupKind.PLATE
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == ("well",)
     assert all(c.file.kind == "zarr" for c in ome_group.children)
@@ -417,6 +432,7 @@ def test_ome_zarr_group_ignores_non_ome_meta_when_ome_present_even_if_invalid():
     }
     group = MockZarrGroup(attrs)
     ome_group = OmeZarrGroup.from_group(group)
+    assert ome_group.kind is None
     assert ome_group.version is None
 
 
