@@ -26,15 +26,8 @@ def _child_paths_and_version_from_attrs(attrs: Mapping[str, Any]) -> Tuple[Tuple
     version: Optional[str] = None
 
     labels = attrs.get("labels")
-    if isinstance(labels, ABCMapping):
-        if isinstance(labels.get("version"), str) and labels.get("version"):
-            version = labels["version"]
-
-        labels_list = labels.get("labels")
-        if isinstance(labels_list, list):
-            children.extend(
-                ChildRef.from_string(path, "label") for path in labels_list if isinstance(path, str) and path
-            )
+    if isinstance(labels, list):
+        children.extend(ChildRef.from_string(path, "label") for path in labels if isinstance(path, str) and path)
 
     well = attrs.get("well")
     if isinstance(well, ABCMapping):
@@ -79,6 +72,9 @@ class OmeZarrGroup:
     scenes: Tuple[Scene, ...] = ()
     children: Tuple[ChildRef, ...] = ()
     _invalid_objects: Tuple[Dict[str, Any], ...] = ()
+
+    def __post_init__(self):
+        assert self.version != "", "Must not instantiate with empty version string"
 
     @classmethod
     def from_attrs(cls, attrs: Mapping[str, Any], *, shape_source: ShapeSource):
