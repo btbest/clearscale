@@ -5,7 +5,7 @@ from typing import Any, Dict, Literal, List, Mapping, Optional, Protocol, Tuple
 from clearscale._multiscale import Multiscale
 from clearscale._scene import Scene
 from clearscale._transforms import FileRef
-from clearscale._services.ome_zarr import ShapeSourceMap
+from clearscale._services.ome_zarr import ShapeSource, ShapeSourceMap
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,7 +72,7 @@ class ZarrGroup(ShapeSourceMap, Protocol):
     def attrs(self) -> Mapping[str, Any]: ...
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True)
 class OmeZarrGroup:
     version: Optional[str] = None
     multiscales: Tuple[Multiscale, ...] = ()
@@ -80,14 +80,12 @@ class OmeZarrGroup:
     children: Tuple[ChildRef, ...] = ()
     _invalid_objects: Tuple[Dict[str, Any], ...] = ()
 
-    def __init__(self, group: ZarrGroup, *, shape_source: Optional[ShapeSourceMap] = None):
+    @classmethod
+    def from_attrs(cls, attrs: Mapping[str, Any], *, shape_source: ShapeSource):
         """
-        Parse an OME-Zarr group and construct the clearscale objects directly represented by its metadata.
-        If the group contains plate, well or labels metadata, collect the contained paths to multiscales.
+        Parse the provided metadata to obtain any Multiscale and Scene definitions it contains.
+        If it contains plate, well or labels metadata, collect the contained paths to multiscales.
         """
-        attrs = group.attrs
-        use_shape_source = shape_source or group
-
         ome_attrs = attrs.get("ome") or attrs
 
         version = ome_attrs.get("version")
@@ -103,7 +101,7 @@ class OmeZarrGroup:
             multiscales = []
             for ms_json in multiscales_json:
                 try:
-                    multiscales.append(Multiscale.from_ome_zarr(ms_json, shape_source=use_shape_source))
+                    multiscales.append(Multiscale.from_ome_zarr(ms_json, shape_source=shape_source))
                 except ValueError:
                     invalid.append(ms_json)
             if not version and multiscales:
@@ -130,8 +128,21 @@ class OmeZarrGroup:
 
         version = version or multiscale_version or scene_version or child_version
 
-        object.__setattr__(self, "version", version)
-        object.__setattr__(self, "multiscales", tuple(multiscales))
-        object.__setattr__(self, "scenes", tuple(scenes))
-        object.__setattr__(self, "children", children)
-        object.__setattr__(self, "_invalid_objects", tuple(invalid))
+        return cls(
+            version=version,
+            multiscales=tuple(multiscales),
+            scenes=tuple(scenes),
+            children=children,
+            _invalid_objects=tuple(invalid),
+        )
+
+    @classmethod
+    def from_group(cls, group: ZarrGroup, *, shape_source: Optional[ShapeSource] = None):
+        """
+        Parse a zarr group's metadata to obtain any Multiscale and Scene definitions it contains.
+        If the group contains plate, well or labels metadata, collect the contained paths to multiscales.
+        Use the provided group as the Multiscale shape_source by default.
+        This can be expensive/slow when the group is on a remote server, so consider other shape_source
+        options if this is an expected common case.
+        """
+        return cls.from_attrs(group.attrs, shape_source=shape_source or group)

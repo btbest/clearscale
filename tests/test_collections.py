@@ -18,7 +18,7 @@ class MockZarrGroup:
 
 def test_ome_zarr_group_with_no_metadata():
     group = MockZarrGroup()
-    ome_group = OmeZarrGroup(group)
+    ome_group = OmeZarrGroup.from_group(group)
     assert ome_group.version is None
     assert ome_group.multiscales == ()
     assert ome_group.scenes == ()
@@ -28,7 +28,7 @@ def test_ome_zarr_group_with_no_metadata():
 def test_ome_zarr_group_ignores_non_list_multiscales(monkeypatch):
     group = MockZarrGroup(attrs={"multiscales": {"not": "a list"}})
     with mock.patch("clearscale.Multiscale.from_ome_zarr") as multiscale_construct:
-        result = OmeZarrGroup(group)
+        result = OmeZarrGroup.from_group(group)
 
     assert not result.multiscales
     multiscale_construct.assert_not_called()
@@ -37,7 +37,7 @@ def test_ome_zarr_group_ignores_non_list_multiscales(monkeypatch):
 def test_ome_zarr_group_ignores_non_mapping_scene(monkeypatch):
     group = MockZarrGroup(attrs={"scene": ["not", "a", "mapping"]})
     with mock.patch("clearscale.Scene.from_ome_zarr") as scene_construct:
-        result = OmeZarrGroup(group)
+        result = OmeZarrGroup.from_group(group)
 
     assert result.scenes == ()
     scene_construct.assert_not_called()
@@ -46,7 +46,7 @@ def test_ome_zarr_group_ignores_non_mapping_scene(monkeypatch):
 def test_ome_zarr_group_ignores_empty_scene_mapping(monkeypatch):
     group = MockZarrGroup(attrs={"scene": {}})
     with mock.patch("clearscale.Scene.from_ome_zarr") as scene_construct:
-        result = OmeZarrGroup(group)
+        result = OmeZarrGroup.from_group(group)
 
     assert result.scenes == ()
     scene_construct.assert_not_called()
@@ -65,7 +65,7 @@ def test_ome_zarr_group_loads_multiscales_in_order(monkeypatch):
     with mock.patch(
         "clearscale.Multiscale.from_ome_zarr", side_effect=[multiscale_0, multiscale_1, multiscale_2]
     ) as multiscale_construct:
-        result = OmeZarrGroup(group)
+        result = OmeZarrGroup.from_group(group)
 
     assert multiscale_construct.call_args_list == [
         ((multiscale_jsons[0],), {"shape_source": group}),
@@ -80,7 +80,7 @@ def test_ome_zarr_group_loads_scene(monkeypatch):
     group = MockZarrGroup(attrs={"scene": scene_json})
     scene = object()
     with mock.patch("clearscale.Scene.from_ome_zarr", return_value=scene) as scene_construct:
-        result = OmeZarrGroup(group)
+        result = OmeZarrGroup.from_group(group)
 
     assert len(result.scenes) == 1
     assert result.scenes[0] is scene
@@ -104,7 +104,7 @@ def test_ome_zarr_group_collects_labels_well_and_plate_paths_in_order():
         },
     }
     group = MockZarrGroup(attrs)
-    ome_group = OmeZarrGroup(group)
+    ome_group = OmeZarrGroup.from_group(group)
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == (
         "label",
@@ -143,7 +143,7 @@ def test_ome_zarr_group_collects_labels_well_and_plate_paths_in_order():
 )
 def test_ome_zarr_group_version_ignores_non_mapping_or_non_list_metadata(attrs):
     group = MockZarrGroup(attrs)
-    ome_group = OmeZarrGroup(group)
+    ome_group = OmeZarrGroup.from_group(group)
     assert ome_group.version is None
     assert not ome_group.multiscales
     assert not ome_group.scenes
@@ -164,7 +164,7 @@ def test_ome_zarr_group_labels_list_only_accepts_strings():
         }
     }
     group = MockZarrGroup(attrs)
-    ome_group = OmeZarrGroup(group)
+    ome_group = OmeZarrGroup.from_group(group)
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == ("label", "label")
     assert all(c.file.kind == "zarr" for c in ome_group.children)
@@ -186,7 +186,7 @@ def test_ome_zarr_group_well_images_only_accept_mapping_entries_with_string_path
         }
     }
     group = MockZarrGroup(attrs)
-    ome_group = OmeZarrGroup(group)
+    ome_group = OmeZarrGroup.from_group(group)
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == ("multiscale",)
     assert all(c.file.kind == "zarr" for c in ome_group.children)
@@ -208,7 +208,7 @@ def test_ome_zarr_group_plate_wells_only_accept_mapping_entries_with_string_path
         }
     }
     group = MockZarrGroup(attrs)
-    ome_group = OmeZarrGroup(group)
+    ome_group = OmeZarrGroup.from_group(group)
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == ("well",)
     assert all(c.file.kind == "zarr" for c in ome_group.children)
@@ -226,7 +226,7 @@ def test_ome_zarr_group_prefers_top_level_version():
             "plate": {"version": "0.2"},
         }
     )
-    result = OmeZarrGroup(group)
+    result = OmeZarrGroup.from_group(group)
     assert result.version == "0.6"
 
 
@@ -240,7 +240,7 @@ def test_ome_zarr_group_prefers_top_level_version():
 )
 def test_ome_zarr_group_version_reads_from_labels_well_or_plate(attrs, expected_version):
     group = MockZarrGroup(attrs)
-    ome_group = OmeZarrGroup(group)
+    ome_group = OmeZarrGroup.from_group(group)
     assert ome_group.version == expected_version
 
 
@@ -251,7 +251,7 @@ def test_ome_zarr_group_version_prefers_labels_over_well_and_plate():
         "plate": {"version": "plate-version"},
     }
     group = MockZarrGroup(attrs)
-    ome_group = OmeZarrGroup(group)
+    ome_group = OmeZarrGroup.from_group(group)
     assert ome_group.version == "labels-version"
 
 
@@ -261,7 +261,7 @@ def test_ome_zarr_group_version_prefers_well_over_plate_when_labels_version_miss
         "plate": {"version": "plate-version"},
     }
     group = MockZarrGroup(attrs)
-    ome_group = OmeZarrGroup(group)
+    ome_group = OmeZarrGroup.from_group(group)
     assert ome_group.version == "well-version"
 
 
@@ -276,7 +276,7 @@ def test_ome_zarr_group_version_prefers_well_over_plate_when_labels_version_miss
 )
 def test_ome_zarr_group_ignores_non_string_versions(attrs):
     group = MockZarrGroup(attrs)
-    ome_group = OmeZarrGroup(group)
+    ome_group = OmeZarrGroup.from_group(group)
     assert ome_group.version is None
 
 
@@ -286,7 +286,7 @@ def test_ome_zarr_group_version_uses_well_when_label_non_string():
         "well": {"version": "0.5"},
     }
     group = MockZarrGroup(attrs)
-    ome_group = OmeZarrGroup(group)
+    ome_group = OmeZarrGroup.from_group(group)
     assert ome_group.version == "0.5"
 
 
@@ -297,7 +297,7 @@ def test_ome_zarr_group_version_uses_well_when_label_empty_string():
         "plate": {"version": "0.4"},
     }
     group = MockZarrGroup(attrs)
-    ome_group = OmeZarrGroup(group)
+    ome_group = OmeZarrGroup.from_group(group)
     assert ome_group.version == "0.5"
 
 
@@ -315,7 +315,7 @@ def test_ome_zarr_group_uses_multiscale_version_when_top_level_missing(monkeypat
         }
     )
 
-    result = OmeZarrGroup(group)
+    result = OmeZarrGroup.from_group(group)
 
     assert result.version == "0.5"
 
@@ -333,7 +333,7 @@ def test_ome_zarr_group_uses_first_string_multiscale_version(monkeypatch):
         }
     )
 
-    result = OmeZarrGroup(group)
+    result = OmeZarrGroup.from_group(group)
 
     assert result.version == "0.4"
 
@@ -353,7 +353,7 @@ def test_ome_zarr_group_uses_scene_version_when_multiscale_version_missing(monke
         }
     )
 
-    result = OmeZarrGroup(group)
+    result = OmeZarrGroup.from_group(group)
 
     assert result.version == "0.5"
     assert len(result.scenes) == 1
