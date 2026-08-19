@@ -12,7 +12,7 @@ from tests.ome_zarr.multiscale_examples import (
     maximal_multiscale_example,
 )
 
-known_keys_that_should_roundtrip_but_todo = ("labels", "omero",)
+known_keys_that_should_roundtrip_but_todo = ("omero",)
 float_roundtrip_abs_tolerance = 2**-54
 
 
