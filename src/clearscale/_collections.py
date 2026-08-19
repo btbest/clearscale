@@ -1,7 +1,7 @@
 from collections.abc import Mapping as ABCMapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Literal, List, Mapping, Optional, Protocol, Tuple
+from typing import Any, Dict, Literal, List, Mapping, Optional, Protocol, Tuple, Union
 import warnings
 
 from clearscale._multiscale import Multiscale
@@ -118,6 +118,14 @@ class OmeZarrGroup:
             raise ValueError(f"Group kind {self.kind!r} does not match its contents; expected {detected_kind!r}.")
 
         object.__setattr__(self, "kind", detected_kind)
+
+    @classmethod
+    def from_single(cls, obj: Union[Multiscale, Scene]) -> "OmeZarrGroup":
+        if isinstance(obj, Multiscale):
+            return cls(multiscales=(obj,))
+        if isinstance(obj, Scene):
+            return cls(scenes=(obj,))
+        raise TypeError(f"Must be called with a Multiscale or Scene, not {obj!r}")
 
     @classmethod
     def from_attrs(cls, attrs: Mapping[str, Any], *, shape_source: ShapeSource):

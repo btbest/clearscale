@@ -80,6 +80,23 @@ def test_ome_zarr_group_with_no_metadata():
     assert ome_group.children == ()
 
 
+@pytest.mark.parametrize(
+    "obj, expected_kind",
+    [
+        (Mock(spec=Multiscale), GroupKind.MULTISCALE),
+        (Mock(spec=Scene), GroupKind.SCENE),
+    ],
+)
+def test_ome_zarr_group_single(obj, expected_kind):
+    group = OmeZarrGroup.from_single(obj)
+    assert group.kind is expected_kind
+
+
+def test_ome_zarr_group_single_raises_unknown():
+    with pytest.raises(TypeError, match="Must be called with a Multiscale or Scene"):
+        _ = OmeZarrGroup.from_single([Mock(spec=Multiscale), Mock(spec=Multiscale)])  # type: ignore[arg-type]
+
+
 def test_ome_zarr_group_ignores_non_list_multiscales(monkeypatch):
     group = MockZarrGroup(attrs={"multiscales": {"not": "a list"}})
     with mock.patch("clearscale.Multiscale.from_ome_zarr") as multiscale_construct:
