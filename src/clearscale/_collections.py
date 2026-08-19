@@ -4,6 +4,7 @@ from enum import Enum
 from typing import Any, Dict, Literal, List, Mapping, Optional, Protocol, Tuple, Union
 import warnings
 
+from clearscale._axis_values import AxisKey
 from clearscale._multiscale import Multiscale
 from clearscale._scene import Scene
 from clearscale._transforms import FileRef, PRE_COLLECTIONS_VERSIONS
@@ -197,7 +198,12 @@ class OmeZarrGroup:
         """
         return cls.from_attrs(group.attrs, shape_source=shape_source or group)
 
-    def to_attrs(self, version: Literal["0.4", "0.5", "0.6.rc0"]) -> Dict[str, Any]:
+    def to_attrs(
+        self,
+        version: Literal["0.4", "0.5", "0.6.rc0"],
+        *,
+        axis_types: Union[None, Literal["infer"], Mapping[AxisKey, Literal["space", "time", "channel"]]] = None,
+    ) -> Dict[str, Any]:
         if version not in SUPPORTED_OME_ZARR_VERSIONS_WRITE:
             raise ValueError(f"Cannot write OME-Zarr with {version=}")
         if self.kind is None:
@@ -205,7 +211,7 @@ class OmeZarrGroup:
         self._validate_for_version(version)
         ome: Dict[str, Any] = {}
         if self.kind is GroupKind.MULTISCALE:
-            ome["multiscales"] = [self.multiscales[0].to_ome_zarr(version=version)]
+            ome["multiscales"] = [self.multiscales[0].to_ome_zarr(version=version, axis_types=axis_types)]
         elif self.kind is GroupKind.SCENE:
             ome["scene"] = self.scenes[0].to_ome_zarr(version=version)
         elif self.kind is GroupKind.LABELS:
@@ -227,7 +233,7 @@ class OmeZarrGroup:
             )
         elif self.kind is GroupKind.COLLECTION:
             if self.multiscales and not self.scenes and not self.children:
-                ome["multiscales"] = [ms.to_ome_zarr(version=version) for ms in self.multiscales]
+                ome["multiscales"] = [ms.to_ome_zarr(version=version, axis_types=axis_types) for ms in self.multiscales]
             else:
                 raise NotImplementedError("No version of OME-Zarr currently supports collections.")
         if version == "0.4":

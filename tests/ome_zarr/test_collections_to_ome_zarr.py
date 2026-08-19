@@ -24,7 +24,7 @@ def test_ome_zarr_group_to_attrs_multiscale(version, expected):
     group = OmeZarrGroup(multiscales=(multiscale,))
     result = group.to_attrs(version)
     assert result == expected
-    multiscale.to_ome_zarr.assert_called_once_with(version=version)
+    multiscale.to_ome_zarr.assert_called_once_with(version=version, axis_types=None)
 
 
 def test_ome_zarr_group_to_attrs_multiscale_0_6_rc0():
@@ -35,7 +35,7 @@ def test_ome_zarr_group_to_attrs_multiscale_0_6_rc0():
     with pytest.warns(UserWarning, match="not a stable version"):
         result = group.to_attrs(version)
     assert result == expected
-    multiscale.to_ome_zarr.assert_called_once_with(version=version)
+    multiscale.to_ome_zarr.assert_called_once_with(version=version, axis_types=None)
 
 
 @pytest.mark.parametrize("version", ["0.4", "0.5"])
@@ -103,8 +103,8 @@ def test_ome_zarr_group_to_attrs_multiple_multiscales_pre_transforms(version, ex
     with pytest.warns(UserWarning, match="multiple multiscales"):
         result = group.to_attrs(version)
     assert result == expected
-    multiscale_0.to_ome_zarr.assert_called_once_with(version=version)
-    multiscale_1.to_ome_zarr.assert_called_once_with(version=version)
+    multiscale_0.to_ome_zarr.assert_called_once_with(version=version, axis_types=None)
+    multiscale_1.to_ome_zarr.assert_called_once_with(version=version, axis_types=None)
 
 
 def test_ome_zarr_group_to_attrs_multiple_multiscales_0_6():
@@ -118,8 +118,8 @@ def test_ome_zarr_group_to_attrs_multiple_multiscales_0_6():
         with pytest.warns(UserWarning, match="not a stable version"):
             result = group.to_attrs(version)
     assert result == expected
-    multiscale_0.to_ome_zarr.assert_called_once_with(version=version)
-    multiscale_1.to_ome_zarr.assert_called_once_with(version=version)
+    multiscale_0.to_ome_zarr.assert_called_once_with(version=version, axis_types=None)
+    multiscale_1.to_ome_zarr.assert_called_once_with(version=version, axis_types=None)
 
 
 @pytest.mark.parametrize(
