@@ -13,6 +13,7 @@ from clearscale._transforms._base import (
     CoordinateSystem,
     TransformGraphNode,
     PRE_TRANSFORMS_VERSIONS,
+    PRE_COLLECTIONS_VERSIONS,
 )
 from clearscale._transforms._transform_types import (
     AffineTransform,
