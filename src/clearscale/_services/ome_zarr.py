@@ -1,9 +1,10 @@
 """Private helpers that support Multiscale and Scene to/from_ome_zarr methods"""
 
+import copy
 import re
 import warnings
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Union, Dict, Literal, List, Any, Optional, Tuple, Protocol, Iterable, TYPE_CHECKING
 
 from clearscale._axis_values import ShapeLike, Translation, PixelSize, AxisKey
@@ -61,6 +62,50 @@ GetShapeFunction = Callable[[str], Tuple[int, ...]]
 path: Relative path to a zarr array.
 Returns: The `.shape` of the array at that path.
 """
+
+
+@dataclass(slots=True)
+class OmeMultiscaleProperties:
+    """Additional properties of multiscale metadata that OME-Zarr loosely specifies.
+    The standard describes what 'should' be written in them, but nothing about how the values
+    should be interpreted. In practice, they are arbitrary fields for display purposes only.
+    Since their semantics are not defined, clearscale does not use them for internal logic."""
+
+    type: str = ""
+    """The 'type' of downscaling method used to create the pyramid"""
+    name: str = ""
+    """Display name"""
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    """Scaling method description. This *should* specify keys 'method', 'version', 'args', 
+    'kwargs', and 'description' (refer to OME-Zarr specification)"""
+
+    @classmethod
+    def from_ome_zarr(cls, multiscale_dict: OME_ZARR_MULTISCALE) -> "OmeMultiscaleProperties":
+        typ = multiscale_dict.get("type", "")
+        if not isinstance(typ, str):
+            typ = ""
+        name = multiscale_dict.get("name", "")
+        if not isinstance(name, str):
+            name = ""
+        metadata = multiscale_dict.get("metadata", {})
+        if not isinstance(metadata, dict):
+            metadata = {}
+        return cls(type=typ, name=name, metadata=metadata)
+
+    def __bool__(self):
+        return bool(self.type or self.name or self.metadata)
+
+    def to_ome_zarr(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {}
+        if self.type:
+            d["type"] = self.type
+        if self.name:
+            d["name"] = self.name
+        if self.metadata and isinstance(self.metadata, dict):
+            d["metadata"] = copy.deepcopy(self.metadata)
+        elif self.metadata:
+            raise ValueError(f"Must not replace Multiscale.ome.metadata. Found: {self.metadata}")
+        return d
 
 
 class HasShape(Protocol):

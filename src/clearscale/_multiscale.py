@@ -668,10 +668,13 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
     """Dataset scale axes that were read as 0.0 from loaded meta; kept for as-read round-trip."""
     has_shapes: bool
     """If False, this indicates the Multiscale was generated with fake (all-singleton) shapes."""
+    ome: ome_zarr.OmeMultiscaleProperties
+    """Additional props specific to OME-Zarr, customizable by user (mutable!)."""
 
     def __init__(
         self,
         *args,
+        ome: Optional[ome_zarr.OmeMultiscaleProperties] = None,
         _transform_graph: Optional[TransformGraph] = None,
         _intrinsic_ref: Optional[NodeRef[CoordinateSystem]] = None,
         _zero_scale_axes_by_key: Optional[Mapping[str, Tuple[AxisKey, ...]]] = None,
@@ -712,6 +715,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
                     zero_scale_axes_by_key[key] = kept_axes
         self._zero_scale_axes_by_key = zero_scale_axes_by_key
         self.has_shapes = has_shapes
+        self.ome = ome if isinstance(ome, ome_zarr.OmeMultiscaleProperties) else ome_zarr.OmeMultiscaleProperties()
 
     def __eq__(self, other):
         return _ScaleMapping.__eq__(self, other)
@@ -783,6 +787,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             _intrinsic_ref=intrinsic_system_ref,
             _zero_scale_axes_by_key=zero_scale_axes_by_key,
             has_shapes=shape_source != "singletons",
+            ome=ome_zarr.OmeMultiscaleProperties.from_ome_zarr(multiscale_dict),
         )
 
     @classmethod
@@ -862,6 +867,8 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             raise ValueError("Cannot write OME-Zarr versions other than 0.4, 0.5 and 0.6.rc0.")
         ome_zarr.validate_multiscale(self)
         result: Dict[str, Any] = {"version": version, "datasets": []}
+        if self.ome:
+            result.update(self.ome.to_ome_zarr())
 
         if name:
             result["name"] = name

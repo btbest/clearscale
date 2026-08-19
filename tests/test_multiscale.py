@@ -235,3 +235,10 @@ def test_proportional_blueprint_restricted_scaling_axes():
     bp = BlueprintShapes.from_multiscale_rescaled(ms, target_shape=target_shape, rounding="floor", scaled_axes="y")
 
     assert bp == BlueprintShapes({"s0": target_shape, "s1": Shape(c=3, y=1, x=6)})
+
+
+def test_multiscale_ome_properties_separate_across_instances():
+    ms1 = Multiscale({"s0": Scale(shape=dict(x=1))})
+    ms2 = Multiscale({"s0": Scale(shape=dict(x=1))})
+    assert id(ms1.ome) != id(ms2.ome)
+    assert ms1.ome is not ms2.ome
