@@ -108,39 +108,39 @@ class FileRef:
     - an absolute URI like 'https://...' or 'file:///C:/...'
     - a relative path like './scales/s0' or '../'
     """
-    kind: Literal["zarr", "json"] = "zarr"
+    path_type: Literal["zarr", "json"] = "zarr"
     """
     'zarr': The path points to a zarr object that should be opened like 'zarr.open(path)'.
     'json': The path points to a file that should be read like 'json.loads(path)'.
     """
 
     def __post_init__(self):
-        assert self.kind in ("zarr", "json")
+        assert self.path_type in ("zarr", "json")
         if not isinstance(self.path, str) or not self.path:
             raise ValueError(f"Path must be string: {self.path}")
 
     @classmethod
     def from_string(cls, path: str):
-        """Constructor that infers `kind` from the provided path"""
+        """Constructor that infers `path_type` from the provided path"""
         assert path and isinstance(path, str), f"Must call with string, received: {path!r}"
-        return cls(kind="json" if path.endswith(".json") else "zarr", path=path)
+        return cls(path_type="json" if path.endswith(".json") else "zarr", path=path)
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "FileRef":
-        kind = value.get("type")
-        if kind not in ("zarr", "json"):
-            raise ValueError(f"Invalid file reference type: {kind!r}")
+        path_type = value.get("type")
+        if path_type not in ("zarr", "json"):
+            raise ValueError(f"Invalid file reference type: {path_type!r}")
         path = value.get("path")
         if not isinstance(path, str):
             raise ValueError(f"Invalid file reference path: {path!r}")
-        return cls(kind=kind, path=path)
+        return cls(path_type=path_type, path=path)
 
     def to_ome_zarr(self, version: str = "rfc-8") -> Union[str, Dict[str, str]]:
         if version in PRE_COLLECTIONS_VERSIONS:
-            if self.kind != "zarr":
+            if self.path_type != "zarr":
                 raise ValueError(f"OME-Zarr version {version} can only reference zarr paths.")
             return self.path
-        return {"type": self.kind, "path": self.path}
+        return {"type": self.path_type, "path": self.path}
 
 
 @dataclass(frozen=True, slots=True)

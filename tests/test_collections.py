@@ -212,7 +212,7 @@ def test_ome_zarr_group_collects_labels_well_and_plate_paths_in_order():
         "well",
         "well",
     )
-    assert all(c.file.kind == "zarr" for c in ome_group.children)
+    assert all(c.file.path_type == "zarr" for c in ome_group.children)
     paths = tuple(c.file.path for c in ome_group.children)
     assert paths == (
         "label-0",
@@ -273,7 +273,7 @@ def test_ome_zarr_group_labels_list_only_accepts_strings():
     assert ome_group.kind is GroupKind.LABELS
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == ("label", "label")
-    assert all(c.file.kind == "zarr" for c in ome_group.children)
+    assert all(c.file.path_type == "zarr" for c in ome_group.children)
     paths = tuple(c.file.path for c in ome_group.children)
     assert paths == ("nuclei", "cytoplasm")
 
@@ -296,7 +296,7 @@ def test_ome_zarr_group_labels_list_only_accepts_strings_under_ome():
     assert ome_group.kind is GroupKind.LABELS
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == ("label", "label")
-    assert all(c.file.kind == "zarr" for c in ome_group.children)
+    assert all(c.file.path_type == "zarr" for c in ome_group.children)
     paths = tuple(c.file.path for c in ome_group.children)
     assert paths == ("nuclei", "cytoplasm")
 
@@ -319,7 +319,7 @@ def test_ome_zarr_group_well_images_only_accept_mapping_entries_with_string_path
     assert ome_group.kind is GroupKind.WELL
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == ("multiscale",)
-    assert all(c.file.kind == "zarr" for c in ome_group.children)
+    assert all(c.file.path_type == "zarr" for c in ome_group.children)
     paths = tuple(c.file.path for c in ome_group.children)
     assert paths == ("image-0",)
 
@@ -344,7 +344,7 @@ def test_ome_zarr_group_well_images_only_accept_mapping_entries_with_string_path
     assert ome_group.kind is GroupKind.WELL
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == ("multiscale",)
-    assert all(c.file.kind == "zarr" for c in ome_group.children)
+    assert all(c.file.path_type == "zarr" for c in ome_group.children)
     paths = tuple(c.file.path for c in ome_group.children)
     assert paths == ("image-0",)
 
@@ -367,7 +367,7 @@ def test_ome_zarr_group_plate_wells_only_accept_mapping_entries_with_string_path
     assert ome_group.kind is GroupKind.PLATE
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == ("well",)
-    assert all(c.file.kind == "zarr" for c in ome_group.children)
+    assert all(c.file.path_type == "zarr" for c in ome_group.children)
     paths = tuple(c.file.path for c in ome_group.children)
     assert paths == ("A/1",)
 
@@ -392,7 +392,7 @@ def test_ome_zarr_group_plate_wells_only_accept_mapping_entries_with_string_path
     assert ome_group.kind is GroupKind.PLATE
     assert len(ome_group.children) > 0
     assert tuple(c.child_type for c in ome_group.children) == ("well",)
-    assert all(c.file.kind == "zarr" for c in ome_group.children)
+    assert all(c.file.path_type == "zarr" for c in ome_group.children)
     paths = tuple(c.file.path for c in ome_group.children)
     assert paths == ("A/1",)
 
