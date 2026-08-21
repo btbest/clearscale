@@ -1,34 +1,38 @@
 from unittest.mock import Mock, MagicMock
 
-from clearscale import Shape, PixelSize, Unit, Scale, BlueprintShapes, Multiscale
+from clearscale import Shape, PixelSize, Unit, Scale, BlueprintShapes, Multiscale, OmeZarrGroup, GroupKind
 
 
 def test_downscale_2_example():
-    mydata = Mock(shape=(3, 54, 1024, 1024))
-    zarr_group = MagicMock()
+    my_data = Mock(shape=(3, 54, 1024, 1024))
 
     # 1. Annotate
-    shape = Shape(zip("tzyx", mydata.shape))  # mydata: your image numpy/zarr
+    shape = Shape(zip("tzyx", my_data.shape))
     pixel_size = PixelSize(t=5.0, z=260.0, y=0.53, x=0.53)
-    unit = Unit(t="s", z="micron", y="micron", x="micron")
+    unit = Unit(t="s", z="micrometer", y="micrometer", x="micrometer")
 
-    # 2. Define scaling paradigm
+    # 2. Define operation plan
     scaling_blueprint = BlueprintShapes.downscale_powers_of_2_xyz(
         base_shape=shape,
         rounding="ceil",
         shape_limit=Shape(z=8, y=128, x=128),
     )
 
-    # 3. Expand metadata
+    # 3. Scale data according to the blueprint
+    # noop for this test
+
+    # 4. Expand and write metadata
     base = Scale(shape, pixel_size, unit)
     ms = Multiscale.from_shapes(scaling_blueprint, base=base)
+    written = OmeZarrGroup.from_single(ms).to_attrs(version="0.6.rc0")
 
-    # 4. Export
-    zarr_group.attrs["ome"]["multiscales"] = [ms.to_ome_zarr(version="0.6.rc0")]
-
-    written = ms.to_ome_zarr(version="0.6.rc0")
-    assert len(written["coordinateSystems"]) == 1
-    written_system_name = written["coordinateSystems"][0]["name"]  # Capture the randomly generated name
+    assert "ome" in written
+    assert "multiscales" in written["ome"]
+    assert "version" in written["ome"] and written["ome"]["version"] == "0.6.rc0"
+    assert len(written["ome"]["multiscales"]) == 1
+    written_ms_dict = written["ome"]["multiscales"][0]
+    assert len(written_ms_dict["coordinateSystems"]) == 1
+    written_system_name = written_ms_dict["coordinateSystems"][0]["name"]  # Capture the randomly generated name
 
     expected = {
         "coordinateSystems": [
@@ -83,7 +87,7 @@ def test_downscale_2_example():
         "version": "0.6.rc0",
     }
 
-    assert written == expected
+    assert written_ms_dict == expected
 
 
 def test_skimage_pyramid_gaussian_example():
@@ -126,24 +130,28 @@ def test_skimage_pyramid_gaussian_example():
     multiscale = blueprint.apply_to_scale(base)
 
     # 5. Save OME-Zarr metadata
-    group.attrs["multiscales"] = [multiscale.to_ome_zarr(version="0.5", axis_types="infer")]
+    group_meta = OmeZarrGroup.from_single(multiscale).to_attrs(version="0.5", axis_types="infer")
+    group.attrs.update(group_meta)
 
-    written = multiscale.to_ome_zarr(version="0.5", axis_types="infer")
-    assert written["axes"] == [
+    written = group_meta
+    assert "ome" in written
+    assert "multiscales" in written["ome"]
+    assert "version" in written["ome"] and written["ome"]["version"] == "0.5"
+    assert len(written["ome"]["multiscales"]) == 1
+    written_ms_dict = written["ome"]["multiscales"][0]
+    assert written_ms_dict["axes"] == [
         {"name": "z", "type": "space", "unit": "micron"},
         {"name": "y", "type": "space", "unit": "nanometer"},
         {"name": "x", "type": "space", "unit": "nanometer"},
     ]
     assert tuple(multiscale.keys()) == ("s0", "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10")
-    assert written["datasets"][1]["coordinateTransformations"] == [{"scale": [50.0, 480.0, 480.0], "type": "scale"}]
+    assert written_ms_dict["datasets"][1]["coordinateTransformations"] == [
+        {"scale": [50.0, 480.0, 480.0], "type": "scale"}
+    ]
 
 
 def test_extract_single_scale_example():
-    zarr = MagicMock()
-    URL = "https://s3.embl.de/i2k-2020/platy-raw.ome.zarr"
-    SCALE_KEY = "s6"
-    LOCAL_PATH = f"demo-output/platy-raw-{SCALE_KEY}.ome.zarr"
-    META = {
+    remote_attrs = {
         "multiscales": [
             {
                 "axes": [
@@ -168,30 +176,56 @@ def test_extract_single_scale_example():
             }
         ]
     }
+    expected_written_meta = {
+        "multiscales": [
+            {
+                "axes": [
+                    {"name": "z", "unit": "micrometer"},
+                    {"name": "y", "unit": "micrometer"},
+                    {"name": "x", "unit": "micrometer"},
+                ],
+                "datasets": [
+                    {"coordinateTransformations": [{"scale": [0.8, 0.64, 0.64], "type": "scale"}], "path": "s6"}
+                ],
+                "version": "0.4",
+            }
+        ]
+    }
 
-    # 1. Extract the raw metadata
+    array_mock = Mock()
+    array_mock.shape = (357, 405, 430)
+    remote_group_mock = MagicMock()
+    remote_group_mock.attrs = remote_attrs
+    remote_group_mock.return_value = array_mock
+    local_group_mock = Mock()
+    zarr = Mock()
+    zarr.open_group = Mock(side_effect=[remote_group_mock, local_group_mock])
+
+    URL = "https://s3.embl.de/i2k-2020/platy-raw.ome.zarr"
+    SCALE_KEY = "s6"
+    LOCAL_PATH = f"demo-output/platy-raw-{SCALE_KEY}.ome.zarr"
+
+    # 1. Discover what's on the server
     remote_group = zarr.open_group(URL)
-    ome_multiscale = META["multiscales"][0]
+    remote_meta = OmeZarrGroup.from_group(remote_group)
+    assert remote_meta.kind is GroupKind.MULTISCALE, "This tells us there is exactly one Multiscale in this group"
+    assert remote_meta.version == "0.4"
+    source_multiscale = remote_meta.multiscales[0]
+    assert SCALE_KEY in source_multiscale, "Multiscale is dict-like, with the sub-paths to arrays as keys"
+    assert source_multiscale[SCALE_KEY].shape == {"z": 357, "y": 405, "x": 430}
 
     # 2. Create the local target and download the data
     source_array = remote_group[SCALE_KEY]
-    local_group = zarr.open_group(str(LOCAL_PATH), mode="w", zarr_version=2)
+    local_group = zarr.open_group(str(LOCAL_PATH), mode="w", zarr_format=2)
     local_array = local_group.create_array(SCALE_KEY, data=source_array, overwrite=True)
 
     # 3. Extract the correct scale metadata and upgrade it to valid independent metadata
-    source_multiscale = Multiscale.from_ome_zarr(ome_multiscale, shape_source="singletons")
     extracted_scale = source_multiscale[SCALE_KEY]
     target_multiscale = Multiscale({SCALE_KEY: extracted_scale})
+    local_group_meta = OmeZarrGroup.from_single(target_multiscale)
 
     # 4. Write the new metadata to the downloaded store
-    local_group.attrs["multiscales"] = [target_multiscale.to_ome_zarr(version="0.4")]
+    local_group.attrs.update(local_group_meta.to_attrs(version="0.4"))
 
-    assert target_multiscale.to_ome_zarr(version="0.4") == {
-        "axes": [
-            {"name": "z", "unit": "micrometer"},
-            {"name": "y", "unit": "micrometer"},
-            {"name": "x", "unit": "micrometer"},
-        ],
-        "datasets": [{"coordinateTransformations": [{"scale": [0.8, 0.64, 0.64], "type": "scale"}], "path": "s6"}],
-        "version": "0.4",
-    }
+    assert local_group_meta.to_attrs(version="0.4") == expected_written_meta
+    local_group.attrs.update.assert_called_once_with(expected_written_meta)
