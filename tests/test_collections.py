@@ -149,6 +149,7 @@ def test_ome_zarr_group_loads_multiscales_in_order(monkeypatch):
         ((multiscale_jsons[2],), {"shape_source": group}),
     ]
     assert result.multiscales == (multiscale_0, multiscale_1, multiscale_2)
+    assert result.maybe_subgroups == ("labels",)
 
 
 def test_ome_zarr_group_ignores_legacy_keys_when_ome_present(monkeypatch):
@@ -168,6 +169,7 @@ def test_ome_zarr_group_ignores_legacy_keys_when_ome_present(monkeypatch):
     multiscale_construct.assert_called_once_with(ome_ms_json, shape_source=group)
     assert result.kind is GroupKind.MULTISCALE
     assert result.multiscales == (ome_ms,)
+    assert result.maybe_subgroups == ("labels",)
 
 
 def test_ome_zarr_group_loads_scene(monkeypatch):
@@ -184,9 +186,23 @@ def test_ome_zarr_group_loads_scene(monkeypatch):
     scene_construct.assert_called_once_with(scene_json)
 
 
-def test_ome_zarr_group_collects_labels_well_and_plate_paths_in_order():
+@pytest.mark.parametrize("attrs", [{"bioformats2raw.layout": 3}, {"ome": {"bioformats2raw.layout": 3}}])
+def test_ome_zarr_group_recognises_bf2raw_marker(attrs):
+    group = MockZarrGroup(attrs=attrs)
+    result = OmeZarrGroup.from_group(group)
+
+    assert result.kind is GroupKind.BF2RAW
+    assert result.version is None
+    assert not result.multiscales
+    assert not result.scenes
+    assert not result.children
+    assert result.maybe_subgroups == ("OME",)
+
+
+def test_ome_zarr_group_collects_labels_series_well_and_plate_paths_in_order():
     attrs = {
         "labels": ["label-0", "label-1"],
+        "series": ["series-0", "series-1"],
         "well": {
             "images": [
                 {"path": "image-0"},
@@ -209,6 +225,8 @@ def test_ome_zarr_group_collects_labels_well_and_plate_paths_in_order():
         "label",
         "multiscale",
         "multiscale",
+        "multiscale",
+        "multiscale",
         "well",
         "well",
     )
@@ -217,6 +235,8 @@ def test_ome_zarr_group_collects_labels_well_and_plate_paths_in_order():
     assert paths == (
         "label-0",
         "label-1",
+        "../series-0",  # <3 bf2raw
+        "../series-1",
         "image-0",
         "image-1",
         "well-0",
@@ -230,6 +250,9 @@ def test_ome_zarr_group_collects_labels_well_and_plate_paths_in_order():
         {"labels": None},
         {"labels": "not-a-list"},
         {"labels": []},
+        {"series": None},
+        {"series": "not-a-list"},
+        {"series": []},
         {"well": None},
         {"well": "well"},
         {"plate": None},
@@ -299,6 +322,50 @@ def test_ome_zarr_group_labels_list_only_accepts_strings_under_ome():
     assert all(c.file.path_type == "zarr" for c in ome_group.children)
     paths = tuple(c.file.path for c in ome_group.children)
     assert paths == ("nuclei", "cytoplasm")
+
+
+def test_ome_zarr_group_series_list_only_accepts_strings():
+    attrs = {
+        "series": [
+            "0",
+            1,
+            None,
+            {"path": "cells"},
+            "",
+            "1",
+        ]
+    }
+    group = MockZarrGroup(attrs)
+    ome_group = OmeZarrGroup.from_group(group)
+    assert ome_group.kind is GroupKind.BF2RAW_OME
+    assert len(ome_group.children) > 0
+    assert tuple(c.child_type for c in ome_group.children) == ("multiscale", "multiscale")
+    assert all(c.file.path_type == "zarr" for c in ome_group.children)
+    paths = tuple(c.file.path for c in ome_group.children)
+    assert paths == ("../0", "../1")  # <3 bf2raw
+
+
+def test_ome_zarr_group_series_list_only_accepts_strings_under_ome():
+    attrs = {
+        "ome": {
+            "series": [
+                "0",
+                1,
+                None,
+                {"path": "cells"},
+                "",
+                "1",
+            ]
+        }
+    }
+    group = MockZarrGroup(attrs)
+    ome_group = OmeZarrGroup.from_group(group)
+    assert ome_group.kind is GroupKind.BF2RAW_OME
+    assert len(ome_group.children) > 0
+    assert tuple(c.child_type for c in ome_group.children) == ("multiscale", "multiscale")
+    assert all(c.file.path_type == "zarr" for c in ome_group.children)
+    paths = tuple(c.file.path for c in ome_group.children)
+    assert paths == ("../0", "../1")  # <3 bf2raw
 
 
 def test_ome_zarr_group_well_images_only_accept_mapping_entries_with_string_path():

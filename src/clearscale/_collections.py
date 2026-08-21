@@ -22,8 +22,20 @@ class GroupKind(str, Enum):
     """One or more children. Children are multiscales"""
     LABELS = "labels"
     """One or more children. Children are (label) multiscales"""
+    BF2RAW = "bioformats2raw"
+    """Indicates the "bioformats2raw.layout" marker is present. You should try `OmeZarrGroup.from_group(bf2raw_group["OME"])`, 
+    which *might* exist, and if it exists, it *might* resolve to GroupKind.BF2RAW_OME and tell you which children exist.
+    If it does exist, it will report the child paths relative to itself, i.e.  "../ms_0", "../ms_1", etc.
+    You will need to strip the leading "../" to use with the parent `bf2raw_group` for example like 
+    `bf2raw_group[ bfw2raw_ome_group.children[0].file.path[3:] ]`.
+    If it does not exist, or it does not specify children, this means there are an unknown number of multiscale children 
+    at sequential number paths like `bf2raw_group["0"]`, `bf2raw_group["1"]`, `bf2raw_group["2"]`, etc."""
+    BF2RAW_OME = "bioformats2raw-OME"
+    """The "OME" sub-group under a BF2RAW parent group. One or more children. Children are multiscales.
+    Child paths are relative to this group, i.e.  "../ms_0", "../ms_1", etc.
+    You will need to strip the leading "../" to get paths relative to the BF2RAW-kind parent group."""
     COLLECTION = "collection"
-    """Any combination or multiple of the above"""
+    """Generic OME-Zarr container. Contains some combination of the other kinds (some mix of multiscales, scenes and/or children)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +58,17 @@ def _children_from_attrs(attrs: Mapping[str, Any]) -> Tuple[Tuple[ChildRef, ...]
     labels = attrs.get("labels")
     if isinstance(labels, list) and any(labels):
         children.extend(ChildRef.from_string(path, "label") for path in labels if isinstance(path, str) and path)
+
+    series = attrs.get("series")  # might be present in the "OME" subgroup of a bf2raw parent group
+    if isinstance(series, list) and any(series):
+        children.extend(
+            ChildRef.from_string(
+                f"../{path}",  # the strings in the "OME" subgroup's "series" attribute refer relative to the bfw2raw parent group
+                "multiscale",
+            )
+            for path in series
+            if isinstance(path, str) and path
+        )
 
     well = attrs.get("well")
     if isinstance(well, ABCMapping):
@@ -93,6 +116,9 @@ class OmeZarrGroup:
     children: Tuple[ChildRef, ...] = ()
     """Contains *all* references to other OME-Zarr objects mentioned in this group's metadata.
     This includes references to wells, label-multiscales, and multiscales contained in wells or scenes."""
+    maybe_subgroups: Tuple[str, ...] = ()
+    """Contains potentially present subgroups implied by the OME-Zarr standard. "OME" for BF2RAW or 
+    "labels" for groups with .multiscales."""
     _invalid_objects: Tuple[Dict[str, Any], ...] = ()
 
     def __post_init__(self):
@@ -114,6 +140,10 @@ class OmeZarrGroup:
                 detected_kind = GroupKind.LABELS
         elif self.multiscales or self.scenes or self.children:
             detected_kind = GroupKind.COLLECTION
+
+        if self.kind is GroupKind.BF2RAW or self.kind is GroupKind.BF2RAW_OME:
+            # BF2RAW kinds are special markers that can't be detected from contents. Preset in the constructor call instead.
+            detected_kind = self.kind
 
         if self.kind is not None and self.kind != detected_kind:
             raise ValueError(f"Group kind {self.kind!r} does not match its contents; expected {detected_kind!r}.")
@@ -177,13 +207,28 @@ class OmeZarrGroup:
 
         children, child_version = _children_from_attrs(ome_attrs)
 
+        # Kind is generally detected from content in post_init; only the bf2raw kinds can't be recognised this way and need to be preset
+        kind = None
+        maybe_subgroups: Tuple[str, ...] = ()
+        if "bioformats2raw.layout" in ome_attrs and not children:
+            # The bf2raw marker can be combined with plate metadata. The plate is supposed to take precedence if present.
+            # If there is plate metadata, there are children, hence `and not children`.
+            kind = GroupKind.BF2RAW
+            maybe_subgroups = ("OME",)
+        elif "series" in ome_attrs and children and all(child.file.path.startswith("../") for child in children):
+            kind = GroupKind.BF2RAW_OME
+        if multiscales:
+            maybe_subgroups = ("labels",)
+
         version = version or multiscale_version or scene_version or child_version
 
         return cls(
+            kind=kind,
             version=version,
             multiscales=tuple(multiscales),
             scenes=tuple(scenes),
             children=children + tuple(scene_children),
+            maybe_subgroups=maybe_subgroups,
             _invalid_objects=tuple(invalid),
         )
 
@@ -243,6 +288,11 @@ class OmeZarrGroup:
 
     def _validate_for_version(self, version: Literal["0.4", "0.5", "0.6.rc0"]):
         assert self.kind is not None, "should skip if empty"
+        not_implemented_kinds = (GroupKind.BF2RAW, GroupKind.BF2RAW_OME)
+        if self.kind in not_implemented_kinds:
+            raise NotImplementedError(
+                f"Writing {self.kind.value} groups is not implemented yet. Please open an issue on GitHub."
+            )
         base_kinds = (GroupKind.MULTISCALE, GroupKind.PLATE, GroupKind.WELL, GroupKind.LABELS)
         supported_kinds = {
             "0.4": base_kinds,
