@@ -134,9 +134,9 @@ def test_ome_zarr_group_loads_multiscales_in_order(monkeypatch):
         {"name": "third"},
     ]
     group = MockZarrGroup(attrs={"multiscales": multiscale_jsons})
-    multiscale_0 = object()
-    multiscale_1 = object()
-    multiscale_2 = object()
+    multiscale_0 = {"ms1/s0": object()}
+    multiscale_1 = {"ms2/s0": object()}
+    multiscale_2 = {"ms3/s0": object()}
     with mock.patch(
         "clearscale.Multiscale.from_ome_zarr", side_effect=[multiscale_0, multiscale_1, multiscale_2]
     ) as multiscale_construct:
@@ -149,12 +149,41 @@ def test_ome_zarr_group_loads_multiscales_in_order(monkeypatch):
         ((multiscale_jsons[2],), {"shape_source": group}),
     ]
     assert result.multiscales == (multiscale_0, multiscale_1, multiscale_2)
-    assert result.maybe_subgroups == ("labels",)
+    # Each multiscale can have labels
+    assert result.maybe_subgroups == ("ms1/labels", "ms2/labels", "ms3/labels")
+
+
+def test_ome_zarr_group_deduplicates_labels_subgroups(monkeypatch):
+    multiscale_jsons = [
+        {"name": "first"},
+        {"name": "second"},
+        {"name": "third"},
+    ]
+    group = MockZarrGroup(attrs={"multiscales": multiscale_jsons})
+    # This is invalid: scale keys across all multiscales must be unique within any particular group.
+    # As in, it's not possible on a file system to store different arrays at the same sub-path.
+    # We'd assume at least one of the multiscale descriptions might be true, so the labels/ subdir might exist.
+    multiscale_0 = {"data/s0": object()}
+    multiscale_1 = {"data/s0": object()}
+    multiscale_2 = {"data/s0": object()}
+    with mock.patch(
+        "clearscale.Multiscale.from_ome_zarr", side_effect=[multiscale_0, multiscale_1, multiscale_2]
+    ) as multiscale_construct:
+        result = OmeZarrGroup.from_group(group)
+
+    assert result.kind is GroupKind.COLLECTION
+    assert multiscale_construct.call_args_list == [
+        ((multiscale_jsons[0],), {"shape_source": group}),
+        ((multiscale_jsons[1],), {"shape_source": group}),
+        ((multiscale_jsons[2],), {"shape_source": group}),
+    ]
+    assert result.multiscales == (multiscale_0, multiscale_1, multiscale_2)
+    assert result.maybe_subgroups == ("data/labels",)
 
 
 def test_ome_zarr_group_ignores_legacy_keys_when_ome_present(monkeypatch):
-    ome_ms = object()
-    legacy_ms = object()
+    ome_ms = {"s0": object()}
+    legacy_ms = {"s0": object()}
     ome_ms_json = {"name": "ome_ms"}
     legacy_ms_json = {"name": "legacy_ms"}
     group = MockZarrGroup(
@@ -558,7 +587,7 @@ def test_ome_zarr_group_plate_wells_only_accept_mapping_entries_with_string_path
     ],
 )
 def test_ome_zarr_group_version_reads_in_priority_order(monkeypatch, attrs, expected_version):
-    monkeypatch.setattr(Multiscale, "from_ome_zarr", Mock(return_value=object()))
+    monkeypatch.setattr(Multiscale, "from_ome_zarr", Mock(return_value={"s0": object()}))
     group = MockZarrGroup(attrs)
     ome_group = OmeZarrGroup.from_group(group)
     assert ome_group.version == expected_version
@@ -588,7 +617,7 @@ def test_ome_zarr_group_version_uses_fallback_when_higher_prio_invalid(invalid):
 
 
 def test_ome_zarr_group_uses_multiscale_version_when_top_level_missing(monkeypatch):
-    from_ome_zarr = Mock(return_value=object())
+    from_ome_zarr = Mock(return_value={"s0": object()})
     monkeypatch.setattr(Multiscale, "from_ome_zarr", from_ome_zarr)
 
     group = MockZarrGroup(attrs={"multiscales": [{"version": "0.5"}]})
@@ -599,7 +628,7 @@ def test_ome_zarr_group_uses_multiscale_version_when_top_level_missing(monkeypat
 
 
 def test_ome_zarr_group_uses_first_string_multiscale_version(monkeypatch):
-    from_ome_zarr = Mock(side_effect=[object(), object()])
+    from_ome_zarr = Mock(side_effect=[{"s0": object()}, {"s0": object()}])
     monkeypatch.setattr(Multiscale, "from_ome_zarr", from_ome_zarr)
 
     group = MockZarrGroup(

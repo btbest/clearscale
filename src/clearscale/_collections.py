@@ -1,6 +1,7 @@
 from collections.abc import Mapping as ABCMapping
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import PurePosixPath
 from typing import Any, Dict, Literal, List, Mapping, Optional, Protocol, Tuple, Union
 import warnings
 
@@ -218,7 +219,8 @@ class OmeZarrGroup:
         elif "series" in ome_attrs and children and all(child.file.path.startswith("../") for child in children):
             kind = GroupKind.BF2RAW_OME
         if multiscales:
-            maybe_subgroups = ("labels",)
+            subgroups_dup = [str(PurePosixPath(next(iter(ms))).parent / "labels") for ms in multiscales]
+            maybe_subgroups = tuple(dict.fromkeys(subgroups_dup))
 
         version = version or multiscale_version or scene_version or child_version
 
