@@ -666,6 +666,11 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
     """The system in which the Scales' shape, pixel size, translation etc. are correct."""
     _zero_scale_axes_by_key: Mapping[str, Tuple[AxisKey, ...]]
     """Dataset scale axes that were read as 0.0 from loaded meta; kept for as-read round-trip."""
+    _pixel_size_t_is_global_scale: bool
+    """Special-case flag for a legacy OME-Zarr convention where time step size (t-scale) is written as a global scale 
+    transform. This indicates that there is a MultiscaleTransforms with source=self.intrinsic and 
+    target=<mock unresolved '-external' coordinate system>, containing (1) a scale transform with only 
+    t-scale being != 1.0, and (2) potentially an arbitrary translation."""
     has_shapes: bool
     """If False, this indicates the Multiscale was generated with fake (all-singleton) shapes."""
     ome: ome_zarr.OmeMultiscaleProperties
@@ -678,6 +683,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         _transform_graph: Optional[TransformGraph] = None,
         _intrinsic_ref: Optional[NodeRef[CoordinateSystem]] = None,
         _zero_scale_axes_by_key: Optional[Mapping[str, Tuple[AxisKey, ...]]] = None,
+        _pixel_size_t_is_global_scale=False,
         has_shapes=True,
         **kwargs,
     ):
@@ -714,6 +720,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
                 if kept_axes:
                     zero_scale_axes_by_key[key] = kept_axes
         self._zero_scale_axes_by_key = zero_scale_axes_by_key
+        self._pixel_size_t_is_global_scale = _pixel_size_t_is_global_scale
         self.has_shapes = has_shapes
         self.ome = ome if isinstance(ome, ome_zarr.OmeMultiscaleProperties) else ome_zarr.OmeMultiscaleProperties()
 
@@ -762,6 +769,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         base_shape = None
         scales_items = []
         zero_scale_axes_by_key = {}
+        uses_legacy_t_scale_convention = []
         for dataset in datasets:
             scale_key = dataset["path"]
             scale_shape = Shape(zip(axis_keys, get_shape(scale_key)))
@@ -769,10 +777,13 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
                 base_shape = scale_shape
             relative_scale_factor = base_shape.scaling_to(scale_shape)
             relative_scale_pixel_size = PixelSize.identity(axis_keys).scaled_by(relative_scale_factor)
-            transformations = dataset.get("coordinateTransformations")
-            scale_pixel_size, scale_translation, zero_scale_axes = ome_zarr.scale_meta_from_dataset_transforms(
-                axis_keys, global_transforms, relative_scale_pixel_size, transformations
+            dataset_transforms = dataset.get("coordinateTransformations")
+            scale_pixel_size, scale_translation, zero_scale_axes, did_merge_t_scale = (
+                ome_zarr.scale_meta_from_dataset_transforms(
+                    axis_keys, global_transforms, relative_scale_pixel_size, dataset_transforms
+                )
             )
+            uses_legacy_t_scale_convention.append(did_merge_t_scale)
             if zero_scale_axes:
                 zero_scale_axes_by_key[scale_key] = zero_scale_axes
             scales_items.append(
@@ -781,11 +792,20 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
                     Scale(shape=scale_shape, pixel_size=scale_pixel_size, translation=scale_translation, unit=unit),
                 )
             )
+        _pixel_size_t_is_global_scale = False
+        if any(uses_legacy_t_scale_convention):
+            if not all(uses_legacy_t_scale_convention):
+                warnings.warn(
+                    "Inconsistent pixel size metadata: Some scales may report incorrect pixel size for the time-axis."
+                )
+            _pixel_size_t_is_global_scale = True
+
         return cls(
             scales_items,
             _transform_graph=transform_graph,
             _intrinsic_ref=intrinsic_system_ref,
             _zero_scale_axes_by_key=zero_scale_axes_by_key,
+            _pixel_size_t_is_global_scale=_pixel_size_t_is_global_scale,
             has_shapes=shape_source != "singletons",
             ome=ome_zarr.OmeMultiscaleProperties.from_ome_zarr(multiscale_dict),
         )
@@ -916,21 +936,19 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         ), f"Dev error: More than one multiscale-level transform in {self._transform_graph.transforms}"
         result["coordinateTransformations"] = [t.to_ome_zarr(version) for t in legacy_tfs[0].transforms]
         axes = list(self.axes())
-        global_scale = ome_zarr.scale_to_pixel_size_with_normalized_zeros(legacy_tfs[0].scale_transform, axes)
-        global_translation = Translation.identity(axes)
-        if legacy_tfs[0].translation_transform:
-            global_translation = legacy_tfs[0].translation_transform.to_translation(axes)
-        # Multiscale.from_ome_zarr collapses the global transforms into each Scale so that
-        # Scale.pixel_size/.translation are correct independent of their containing Multiscale.
-        # That means we have to decompose them back out for perfect metadata round-trip.
         for key, scale in self.items():
-            dataset_scale = scale.pixel_size.scaled_by(Factor(global_scale).inverted())
-            dataset_translation = scale.translation - global_translation
+            dataset_scale = scale.pixel_size
+            if self._pixel_size_t_is_global_scale:
+                # This indicates the scale's pixel size for "t" was multiplied in from the global scale in from_ome_zarr
+                global_scale = ome_zarr.scale_to_pixel_size_with_normalized_zeros(
+                    legacy_tfs[0].scale_transform.scale, axes
+                )
+                dataset_scale = scale.pixel_size.scaled_by(Factor(global_scale).with_identity_except("t").inverted())
             dataset = ome_zarr.build_dataset_dict(
                 version,
                 key,
                 dataset_scale,
-                dataset_translation,
+                scale.translation,
                 serialized_zero_scale_axes=self._zero_scale_axes_by_key.get(key, ()),
             )
             result["datasets"].append(dataset)

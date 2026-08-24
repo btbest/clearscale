@@ -406,9 +406,9 @@ def multiscale_graph_from_legacy(
         # Store the multiscale-level transforms as a transform to a non-existent mock system.
         # This allows Multiscale.to_ome_zarr to divide/subtract them back out of Scale.pixel_size/.translation
         # for perfect metadata round-trip.
-        mock_ref = _UnresolvedRef(name=f"{name}-intermediate")
+        synthetic_external = _UnresolvedRef(name=f"{name}-external")
         try:
-            bound_sequence = global_transforms.bound(source=intrinsic_system_ref, target=mock_ref)
+            bound_sequence = global_transforms.bound(source=intrinsic_system_ref, target=synthetic_external)
             assert isinstance(bound_sequence, MultiscaleTransforms), "should not change type"
             bound_transform = bound_sequence
             graph = TransformGraph([bound_transform])
@@ -423,17 +423,32 @@ def scale_meta_from_dataset_transforms(
     global_transforms: Optional["MultiscaleTransforms"],
     relative_scale_pixel_size: PixelSize,
     transformations: Optional[OME_ZARR_TRANSFORMS],
-) -> Tuple[PixelSize, Optional[Translation], Optional[Tuple[AxisKey, ...]]]:
+) -> Tuple[PixelSize, Optional[Translation], Optional[Tuple[AxisKey, ...]], bool]:
     """
     Extract pixel size and translation according to this dataset's `coordinateTransformations`.
     Returns the scale's:
         - pixel size (defaulting to 1.0 or relative factor if invalid meta)
         - translation (defaulting to None if invalid meta)
         - a tuple of axis keys where the `scale` transform was 0.0 (normally None, purely for metadata round-trip)
+        - merged_t_scale: bool -- whether the global_transform's t-scale was assumed to mean pixel size along t
+
+    Special case / ambiguity: OME-Zarr 0.4 and 0.5 define the dataset scale as the pixel size, but the spec's own
+    primary example shows the pixel size along the time-axis only recorded in the global_transforms.
+    nifti-zarr formalises this as a standard (https://github.com/neuroscales/nifti-zarr#24-nifti-header).
+    Their own xyztc voxel size becomes [1,1,z,y,x] in dataset-scale, and [t,c,1,1,1] in multiscale-scale:
+    nifti.zattrs["VoxelSize"][:3]  ==  zattrs["multiscales"][0]["datasets"][0]["coordinateTransformations"][0]["scale"][2:5][::-1]
+    nifti.zattrs["VoxelSize"][3]   ==  zattrs["multiscales"][0]["coordinateTransformations"][0]["scale"][0]
+    nifti.zattrs["VoxelSize"][4]   ==  zattrs["multiscales"][0]["coordinateTransformations"][0]["scale"][1]
+    At the same time, we have the opposite use, following the language of the spec, at HHMI (https://github.com/AI-HHMI/miao/issues/25).
+    Here, the dataset-scale is the voxel size, and the multiscale-scale is an instrument-specific magnification.
+    This manifests as [z1, y1, x1] in dataset-scale and [z2, y2, x2] in multiscale-scale.
+    -- So what do we make of it?
+    Special-case t. We use dataset-scale as pixel size, but iff dataset-scale for t is 1, then use multiscale-scale.
+    Don't special-case c because anything but 1.0 is nonsense anyway.
     """
     if transformations is None:
         # Fine: OME-Zarr up to v0.3 didn't have coordinateTransformations
-        return relative_scale_pixel_size, None, None
+        return relative_scale_pixel_size, None, None, False
 
     try:
         dataset_transforms = MultiscaleTransforms.from_list(transformations)
@@ -443,7 +458,7 @@ def scale_meta_from_dataset_transforms(
             "Continuing with relative scale factor as pixel size. Received: "
             f"{transformations!r}"
         )
-        return relative_scale_pixel_size, None, None
+        return relative_scale_pixel_size, None, None, False
 
     if dataset_transforms is None:
         # Meta existed and was valid but e.g. empty
@@ -452,7 +467,7 @@ def scale_meta_from_dataset_transforms(
             "Continuing with relative scale factor as pixel size. Received: "
             f"{transformations!r}"
         )
-        return relative_scale_pixel_size, None, None
+        return relative_scale_pixel_size, None, None, False
 
     if len(axis_keys) != len(dataset_transforms.scale_transform.scale):
         warnings.warn(
@@ -461,38 +476,46 @@ def scale_meta_from_dataset_transforms(
             "Continuing with relative scale factor as pixel size. Received: "
             f"{dataset_transforms.scale_transform.scale!r}"
         )
-        return relative_scale_pixel_size, None, None
+        return relative_scale_pixel_size, None, None, False
 
-    composed_transforms: MultiscaleTransforms = dataset_transforms
-
-    if global_transforms is not None:
-        try:
-            collapsed = TransformSequence((dataset_transforms, global_transforms)).collapsed(raise_uncollapsed=True)
-            if isinstance(collapsed, MultiscaleTransforms):
-                composed_transforms = collapsed
-        except ValueError:
-            pass
-
-    if any(v < 0.0 for v in composed_transforms.scale_transform.scale):
+    if any(v < 0.0 for v in dataset_transforms.scale_transform.scale):
         warnings.warn(
             f"Invalid OME-Zarr metadata: dataset has negative pixel size values. "
             "Continuing with relative scale factor as pixel size. Received: "
-            f"{composed_transforms.scale_transform.scale!r}"
+            f"{dataset_transforms.scale_transform.scale!r}"
         )
-        return relative_scale_pixel_size, None, None
+        return relative_scale_pixel_size, None, None, False
 
-    scale_pixel_size = scale_to_pixel_size_with_normalized_zeros(composed_transforms.scale_transform, axis_keys)
+    dataset_t_scale_replaced_with_global = False
+    axes = list(axis_keys)
+    pixel_size_values = list(dataset_transforms.scale_transform.scale)
+    if "t" in axes and global_transforms is not None:
+        # Special case for the "t pixel size in global transforms" convention.
+        # We only assume global t is t-pixel-size if all other indicators match
+        # (dataset t-scale is identity, global scale *only* defines t-scale)
+        t_index = axes.index("t")
+        dataset_t_scale = pixel_size_values[t_index]
+        global_scale = global_transforms.scale_transform.scale
+        global_scale_t = global_scale[t_index]
+        global_scale_non_t = global_scale[:t_index] + global_scale[t_index + 1 :]
+        noops = (PixelSize._default(), 0)
+        if dataset_t_scale in noops and all(v in noops for v in global_scale_non_t):
+            pixel_size_values[t_index] = global_scale_t
+            dataset_t_scale_replaced_with_global = True
+
+    scale_pixel_size = scale_to_pixel_size_with_normalized_zeros(pixel_size_values, axis_keys)
     scale_translation = (
-        composed_transforms.translation_transform.to_translation(axis_keys)
-        if composed_transforms.translation_transform
+        dataset_transforms.translation_transform.to_translation(axis_keys)
+        if dataset_transforms.translation_transform
         else None
     )
-    zeros = tuple(axis for axis, value in zip(axis_keys, composed_transforms.scale_transform.scale) if value == 0)
-    return scale_pixel_size, scale_translation, zeros
+    zeros = tuple(axis for axis, value in zip(axis_keys, dataset_transforms.scale_transform.scale) if value == 0)
+    return scale_pixel_size, scale_translation, zeros, dataset_t_scale_replaced_with_global
 
 
-def scale_to_pixel_size_with_normalized_zeros(scale_transform: ScaleTransform, axes: Sequence[AxisKey]) -> PixelSize:
-    normalized_scale = (PixelSize._default() if value == 0 else value for value in scale_transform.scale)
+def scale_to_pixel_size_with_normalized_zeros(scale: Sequence[float], axes: Sequence[AxisKey]) -> PixelSize:
+    assert len(scale) == len(axes), "should make sure before calling"
+    normalized_scale = (PixelSize._default() if value == 0 else value for value in scale)
     return PixelSize(zip(axes, normalized_scale))
 
 
