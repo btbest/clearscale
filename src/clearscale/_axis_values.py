@@ -8,7 +8,6 @@ from typing import (
     Any,
     Mapping,
     Generic,
-    Protocol,
     TypeVar,
     Union,
     Callable,
@@ -20,11 +19,14 @@ from typing import (
     KeysView,
     ValuesView,
     Tuple,
+    Iterable,
 )
 
-AxisKey = Hashable
+from clearscale._spatial_relations import SpatialRelation
+from clearscale.types import AxisKey, _Ordered, OrderedAxes
+
 AxisKeyT = TypeVar("AxisKeyT", bound=AxisKey)
-AxisKeyT_co = TypeVar("AxisKeyT_co", bound=AxisKey, covariant=True)
+OrderedAxesT = _Ordered[AxisKeyT]
 AxisMappedHashable = TypeVar("AxisMappedHashable", bound=Hashable)
 AxisMappedPrimitive = TypeVar("AxisMappedPrimitive", int, float, str)
 Axes = Union[Collection[AxisKey], str]
@@ -35,18 +37,6 @@ RoundingFunction = Callable[[float], int]
 RoundingMethod = Union[Literal["ceil"], Literal["floor"], Literal["round"], RoundingFunction]
 _AxisMappingSelf = TypeVar("_AxisMappingSelf", bound="_AxisMapping[Any, Any]")
 _AxisValuesSelf = TypeVar("_AxisValuesSelf", bound="_AxisValues[Any, Any]")
-
-
-class _Ordered(Protocol[AxisKeyT_co]):
-    """Defined order (unlike Iterable, Collection), but not necessarily indexable (unlike Sequence).
-    To match e.g. strings, but also odict_keys and of course _AxisMapping"""
-
-    def __iter__(self) -> Iterator[AxisKeyT_co]: ...
-    def __len__(self) -> int: ...
-
-
-OrderedAxesT = _Ordered[AxisKeyT]
-OrderedAxes = _Ordered[AxisKey]
 
 
 def _axis_in(axis: AxisKey, axes: Axes) -> bool:
@@ -234,7 +224,7 @@ class _AxisValues(ABC, _AxisMapping[AxisKeyT, AxisMappedPrimitive], Generic[Axis
         return self.__class__(replaced_items)
 
 
-def _require_identical_axes(left: Mapping[AxisKey, object], right: Mapping[AxisKey, object]) -> None:
+def _require_identical_axes(left: Iterable[AxisKey], right: Iterable[AxisKey]) -> None:
     left_axes = list(left)
     right_axes = list(right)
     if left_axes != right_axes:
@@ -281,7 +271,7 @@ class _AxisFloats(_AxisValues[AxisKey, float], ABC):
                 raise TypeError(f"All values must be float. Got {type(value).__name__} for axis '{axis}'.")
 
 
-class Factor(_AxisFloats):
+class Factor(_AxisFloats, SpatialRelation):
     """
     Describes relative scaling factors from some shape to another.
     The values are in units of "raw pixels per scaled pixel".
@@ -308,6 +298,10 @@ class Factor(_AxisFloats):
             Factor(t=0.1, c=1.0, z=0.25, y=120.0, x=120.0)
         """
         return super().with_axes(axes)
+
+    def target_axes(self, source_axes: OrderedAxes) -> Tuple[AxisKey, ...]:
+        _require_identical_axes(source_axes, self.keys())
+        return tuple(self.keys())
 
     @classmethod
     def identity(cls, axes: OrderedAxes) -> "Factor":
@@ -484,7 +478,7 @@ class PixelSize(_AxisFloats):
         return NotImplemented
 
 
-class Translation(_AxisFloats):
+class Translation(_AxisFloats, SpatialRelation):
     """Describes a shift in physical units."""
 
     @classmethod
@@ -503,6 +497,10 @@ class Translation(_AxisFloats):
             Translation(t=0.3, c=0.0, z=0.0, y=0.5, x=0.5)
         """
         return super().with_axes(axes)
+
+    def target_axes(self, source_axes: OrderedAxes) -> Tuple[AxisKey, ...]:
+        _require_identical_axes(source_axes, self.keys())
+        return tuple(self.keys())
 
     @classmethod
     def identity(cls, axes: OrderedAxes) -> "Translation":
