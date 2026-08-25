@@ -50,8 +50,11 @@ from clearscale._transforms import (
     IdentityTransform,
     TransformGraphNode,
     PRE_TRANSFORMS_VERSIONS,
+    Transform,
+    _UnresolvedRef,
 )
 from clearscale._services import ome_zarr, precomputed
+from clearscale._transforms._base import _ordered_unique_refs
 
 ScaleKey = str
 ValueType = TypeVar("ValueType", Shape, Factor, "Scale")
@@ -869,11 +872,48 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         return tuple(scaled)
 
     @cached_property
+    def coordinate_systems(self) -> Tuple[str, ...]:
+        """Spaces, other than the multiscale's own, into which it can be transformed."""
+        return tuple(ref.name for ref in self._transform_graph.all_system_refs)
+
+    @cached_property
     def keys_by_shape(self) -> Mapping[Shape, Tuple[ScaleKey, ...]]:
         grouped = defaultdict(list)
         for key, scale in self.items():
             grouped[scale.shape].append(key)
         return {shape: tuple(keys) for shape, keys in grouped.items()}
+
+    def with_coordinate_systems_of(self, other: "Multiscale") -> "Multiscale":
+        inherited = tuple(t for t in other._transform_graph.transforms if not self._is_transform_path_bound(t))
+        substituted = tuple(
+            self._replace_transform_ref(t, other._intrinsic_ref, self._intrinsic_ref) for t in inherited
+        )
+        incoming_refs = tuple(
+            self._intrinsic_ref if ref == other._intrinsic_ref else ref
+            for ref in other._transform_graph.all_system_refs
+        )
+        incoming_names = {ref.name for ref in incoming_refs if ref != self._intrinsic_ref}
+
+        if not substituted and not incoming_names:
+            return self
+
+        existing_names = set(self.coordinate_systems)
+        collisions = incoming_names & existing_names
+        if collisions:
+            raise ValueError(
+                f"Cannot port coordinate systems {collisions} into Multiscale that already has {existing_names}."
+            )
+
+        new_graph = TransformGraph(
+            transforms=self._transform_graph.transforms + substituted,
+            system_refs=_ordered_unique_refs(self._transform_graph.all_system_refs + incoming_refs),
+        )
+        return Multiscale(
+            self.items(),
+            _transform_graph=new_graph,
+            _intrinsic_ref=self._intrinsic_ref,
+            _zero_scale_axes_by_key=self._zero_scale_axes_by_key,
+        )
 
     # Ignore narrowing of `version: str` to Literal (nicer to be explicit)
     def to_ome_zarr(  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -970,3 +1010,13 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
     def _get_interface_transform(self):
         """Allows a scene to traverse into this subgraph"""
         return IdentityTransform(source=self._intrinsic_ref, target=self.as_ref(self._intrinsic_ref.name))
+
+    @staticmethod
+    def _is_transform_path_bound(t: Transform) -> bool:
+        """True for edges bound to another Multiscale's storage location (e.g. label overlays),
+        which must not be carried into a Multiscale at a different location."""
+        return any(isinstance(ref, _UnresolvedRef) and ref.file for ref in (t.source, t.target))
+
+    @staticmethod
+    def _replace_transform_ref(t: Transform, old: NodeRef, new: NodeRef) -> Transform:
+        return t.bound(source=new if t.source == old else t.source, target=new if t.target == old else t.target)

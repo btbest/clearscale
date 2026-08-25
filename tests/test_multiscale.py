@@ -12,7 +12,7 @@ from clearscale import (
     BlueprintFactors,
     Factor,
 )
-from clearscale._transforms import CoordinateSystem, NodeRef
+from clearscale._transforms import CoordinateSystem, IdentityTransform, TransformGraph, _UnresolvedRef, FileRef, NodeRef
 
 
 def _ref(axes: str, name: str) -> NodeRef[CoordinateSystem]:
@@ -237,8 +237,91 @@ def test_proportional_blueprint_restricted_scaling_axes():
     assert bp == BlueprintShapes({"s0": target_shape, "s1": Shape(c=3, y=1, x=6)})
 
 
+def _multiscale(axes="yx", size=4) -> Multiscale:
+    return Multiscale({"s0": Scale(shape=Shape(zip(axes, [size] * len(axes))))})
+
+
 def test_multiscale_ome_properties_separate_across_instances():
-    ms1 = Multiscale({"s0": Scale(shape=dict(x=1))})
-    ms2 = Multiscale({"s0": Scale(shape=dict(x=1))})
+    ms1 = _multiscale()
+    ms2 = _multiscale()
     assert id(ms1.ome) != id(ms2.ome)
     assert ms1.ome is not ms2.ome
+
+
+def _with_extra_system(ms: Multiscale, name: str) -> Multiscale:
+    """Attach one additional named coordinate system to `ms` via an identity edge from its intrinsic ref."""
+    extra_ref = CoordinateSystem.without_semantics(tuple(ms.axes())).as_ref(name)
+    edge = IdentityTransform().bound(source=ms._intrinsic_ref, target=extra_ref)
+    graph = TransformGraph(transforms=ms._transform_graph.transforms + (edge,))
+    return Multiscale(ms.items(), _transform_graph=graph, _intrinsic_ref=ms._intrinsic_ref)
+
+
+def _with_path_bound_edge(ms: Multiscale, path: str) -> Multiscale:
+    """Attach a path-bound edge to `ms`, simulating a link to a label-Multiscale overlay."""
+    edge = IdentityTransform().bound(
+        source=ms._intrinsic_ref, target=_UnresolvedRef(name=path, file=FileRef.from_string(path))
+    )
+    graph = TransformGraph(transforms=ms._transform_graph.transforms + (edge,))
+    return Multiscale(ms.items(), _transform_graph=graph, _intrinsic_ref=ms._intrinsic_ref)
+
+
+def test_multiscale_with_coordinate_systems_of_replaces_intrinsic():
+    source_ms = _with_extra_system(_multiscale(), "world")
+
+    derived_ms = _multiscale()
+    result = derived_ms.with_coordinate_systems_of(source_ms)
+
+    assert source_ms._intrinsic_ref not in result._transform_graph.all_system_refs
+    assert derived_ms._intrinsic_ref in result._transform_graph.all_system_refs
+    assert "world" in result.coordinate_systems
+
+
+def test_multiscale_with_coordinate_systems_of_does_not_accumulate_on_repetition():
+    source_ms = _with_extra_system(_multiscale(), "world")
+
+    middle_ms = _multiscale().with_coordinate_systems_of(source_ms)
+    derived_ms = _multiscale().with_coordinate_systems_of(middle_ms)
+
+    assert source_ms._intrinsic_ref not in derived_ms._transform_graph.all_system_refs
+    assert middle_ms._intrinsic_ref not in derived_ms._transform_graph.all_system_refs
+    assert len(derived_ms._transform_graph.transforms) == len(middle_ms._transform_graph.transforms) == 1
+    assert "world" in derived_ms.coordinate_systems
+
+
+def test_multiscale_with_coordinate_systems_of_preserves_existing_systems_on_caller():
+    caller_ms = _with_extra_system(_multiscale(), "caller_space")
+    donor_ms = _with_extra_system(_multiscale(), "world")
+
+    result = caller_ms.with_coordinate_systems_of(donor_ms)
+
+    assert "caller_space" in result.coordinate_systems
+    assert "world" in result.coordinate_systems
+
+
+def test_multiscale_with_coordinate_systems_of_preserves_caller_on_noop():
+    caller_ms = _with_extra_system(_multiscale(), "only_space")
+    donor_ms = _multiscale()  # plain, isolated: nothing to contribute
+
+    result = caller_ms.with_coordinate_systems_of(donor_ms)
+
+    assert result is caller_ms
+
+
+def test_multiscale_with_coordinate_systems_of_does_not_port_path_bound_transforms():
+    source_ms = _with_extra_system(_multiscale(), "world")
+    source_ms = _with_path_bound_edge(source_ms, "labels")
+
+    derived_ms = _multiscale()
+    result = derived_ms.with_coordinate_systems_of(source_ms)
+
+    assert "world" in result.coordinate_systems
+    assert len(result._transform_graph.transforms) == 1
+    assert not any(Multiscale._is_transform_path_bound(t) for t in result._transform_graph.transforms)
+
+
+def test_multiscale_with_coordinate_systems_of_raises_on_name_collision():
+    caller_ms = _with_extra_system(_multiscale(), "world")
+    donor_ms = _with_extra_system(_multiscale(), "world")
+
+    with pytest.raises(ValueError):
+        caller_ms.with_coordinate_systems_of(donor_ms)
