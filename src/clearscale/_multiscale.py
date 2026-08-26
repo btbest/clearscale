@@ -735,6 +735,12 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
     def __hash__(self):
         return _ScaleMapping.__hash__(self)
 
+    def copy(self) -> "Multiscale":
+        raise NotImplementedError(
+            "Shallow copying of Multiscale is likely to cause surprising behavior. "
+            "Please use the `copy` module and consider using `copy.deepcopy()` to avoid mutating the original."
+        )
+
     @staticmethod
     def from_shapes(
         blueprint: Mapping[ScaleKey, ShapeLike],
