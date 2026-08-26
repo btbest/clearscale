@@ -1,3 +1,4 @@
+import pytest
 from clearscale._axis_values import PixelSize, Shape
 from clearscale._multiscale import Multiscale, Scale
 
@@ -46,7 +47,8 @@ def test_multiscale_to_ome_zarr_falls_back_on_nonuniform_t_scale():
         _legacy_convention_global_t_scale=0.5,
     )
 
-    result = ms.to_ome_zarr(version="0.4")
+    with pytest.warns(UserWarning, match="Multiscale claims to use legacy t convention but has non-uniform pixel_size"):
+        result = ms.to_ome_zarr(version="0.4")
 
     assert "coordinateTransformations" not in result
     assert _dataset_scale(result, "s0") == [0.5, 0.3, 20.0, 30.0]

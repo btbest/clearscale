@@ -56,6 +56,9 @@ from clearscale._transforms import (
     _UnresolvedRef,
     relation_to_transform,
     ScaleTransform,
+    TransformSequence,
+    ProjectAxisTransform,
+    TranslationTransform,
 )
 from clearscale._services import ome_zarr, precomputed
 
@@ -1003,18 +1006,21 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         )
         result["axes"] = intrinsic_system_dict["axes"]
 
-        legacy_tfs = []
-        if self._transform_graph:
-            legacy_tfs = [t for t in self._transform_graph.transforms if isinstance(t, ome_zarr.MultiscaleTransforms)]
-        if not self._legacy_convention_global_t_scale:
+        multiscale_transforms = self._legacy_multiscale_transforms()
+        all_scale_t_matching = "t" in self.axes() and all(
+            scale.pixel_size["t"] == self._legacy_convention_global_t_scale for scale in self.values()
+        )
+        if not self._legacy_convention_global_t_scale or not all_scale_t_matching:
             # "Normal" case, no special treatment.
-            if legacy_tfs:
+            if self._legacy_convention_global_t_scale:
+                pixel_sizes = {scale_key: scale.pixel_size["t"] for scale_key, scale in self.items()}
+                warnings.warn(
+                    f"Dev error? Multiscale claims to use legacy t convention but has non-uniform pixel_size[t]: {pixel_sizes}"
+                )
+            if multiscale_transforms:
                 # Unconventional use of multiscale-transforms for some transform to an undefined external reference.
                 # Write as read.
-                assert (
-                    len(legacy_tfs) <= 1
-                ), f"Dev error: More than one multiscale-level transform in {self._transform_graph.transforms}"
-                result["coordinateTransformations"] = legacy_tfs[0].to_legacy_ome_zarr()
+                result["coordinateTransformations"] = multiscale_transforms.to_legacy_ome_zarr()
             for key, scale in self.items():
                 dataset = ome_zarr.build_dataset_dict(
                     version,
@@ -1030,22 +1036,19 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         axes = list(self.axes())
         global_t_scale = self._legacy_convention_global_t_scale
         assert global_t_scale and "t" in axes, "global t-scale must not be set when inapplicable"
-        if not legacy_tfs:
+        if multiscale_transforms is None:
             global_pixel_size = PixelSize(t=global_t_scale).with_axes(axes)
             global_scale = ScaleTransform.from_pixel_size(global_pixel_size)
             multiscale_transforms = ome_zarr.MultiscaleTransforms((global_scale,))
         else:
-            assert (
-                len(legacy_tfs) <= 1
-            ), f"Dev error: More than one multiscale-level transform in {self._transform_graph.transforms}"
-            global_scale_values = list(legacy_tfs[0].scale_transform.scale)
+            global_scale_values = list(multiscale_transforms.scale_transform.scale)
             assert all(v in (PixelSize._default(), 0) for v in global_scale_values), "doesn't conform to convention"
             global_scale_values[axes.index("t")] = global_t_scale
             global_scale = ScaleTransform(scale=tuple(global_scale_values))
             tfs = (
                 (global_scale,)
-                if legacy_tfs[0].translation_transform is None
-                else (global_scale, legacy_tfs[0].translation_transform)
+                if multiscale_transforms.translation_transform is None
+                else (global_scale, multiscale_transforms.translation_transform)
             )
             multiscale_transforms = ome_zarr.MultiscaleTransforms(tfs)
         result["coordinateTransformations"] = multiscale_transforms.to_legacy_ome_zarr()
@@ -1100,3 +1103,48 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         while (new_name := f"{old_ref.name}-{i}") in exclude:
             i += 1
         return old_ref.owner.as_ref(new_name)
+
+    def _legacy_multiscale_transforms(self) -> Optional["ome_zarr.MultiscaleTransforms"]:
+        """
+        Inspect graph to find MultiscaleTransforms for multiscale_dict["coordinateTransformations"].
+        Preferably bound directly on this Multiscale's own intrinsic system (exact, lossless).
+        Falls back to one reachable via inserts-only ProjectAxisTransform path,
+        in which case the MultiscaleTransforms can be widened to self's axes with identity values.
+        This padding is a deliberate approximation: the legacy format cannot express the ProjectAxisTransform
+        itself, but MultiscaleTransforms along undefined axes are implicitly identities.
+        """
+        candidates = [t for t in self._transform_graph.transforms if isinstance(t, ome_zarr.MultiscaleTransforms)]
+
+        for t in candidates:
+            if t.source == self._intrinsic_ref:
+                return t
+
+        own_axes = tuple(self.axes())
+        for t in candidates:
+            assert t.source is not None, "Should have no unbound transforms in graph"
+            path = self._transform_graph.path_between(self._intrinsic_ref, t.source, allow_inverse=True)
+            if path and self._is_pure_axis_projection(path):
+                return self._widened_multiscale_transforms(t, target_axes=own_axes)
+
+        return None
+
+    @staticmethod
+    def _is_pure_axis_projection(path: List["Transform"]) -> bool:
+        if not path:
+            return True
+        collapsed = TransformSequence(tuple(path)).collapsed() if len(path) > 1 else path[0]
+        return isinstance(collapsed, IdentityTransform) or isinstance(collapsed, ProjectAxisTransform)
+
+    @staticmethod
+    def _widened_multiscale_transforms(t, *, target_axes) -> "ome_zarr.MultiscaleTransforms":
+        source_axes = tuple(t.source.owner.axes())
+        scale = ome_zarr.scale_to_pixel_size_with_normalized_zeros(t.scale_transform.scale, source_axes).with_axes(
+            target_axes
+        )
+        widened_scale = ScaleTransform(scale=scale.to_tuple())
+        if t.translation_transform is None:
+            return ome_zarr.MultiscaleTransforms(transforms=(widened_scale,))
+        translation = t.translation_transform.to_translation(source_axes).with_axes(target_axes)
+        return ome_zarr.MultiscaleTransforms(
+            transforms=(widened_scale, TranslationTransform.from_translation(translation))
+        )
