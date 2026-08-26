@@ -195,6 +195,11 @@ class MultiscaleTransforms(TransformSequence):
 
         TransformSequence.__post_init__(self)
 
+    def to_legacy_ome_zarr(self) -> List[Dict[str, Any]]:
+        """TransformSequence.to_ome_zarr is for 0.6.rc0 and upwards; this handles legacy 0.4/0.5"""
+        version = "0.5"  # Same format for 0.4 and 0.5, so doesn't matter which
+        return [t.to_ome_zarr(version) for t in self.transforms]
+
     @property
     def scale_transform(self) -> ScaleTransform:
         scale = self.transforms[0]
@@ -387,9 +392,55 @@ def extract_multiscale_graph(
         return graph, intrinsic_system_ref
 
 
+def global_t_scale_if_matches_legacy_convention(
+    multiscale: OME_ZARR_MULTISCALE,
+    global_transforms: MultiscaleTransforms,
+    axes: Tuple[AxisKey, ...],
+) -> Optional[float]:
+    """
+    Special case / ambiguity: OME-Zarr 0.4 and 0.5 define the dataset scale as the pixel size, but the spec's own
+    primary example shows the pixel size along the time-axis only recorded in the global_transforms (multiscale-scale).
+
+    nifti-zarr formalises this as a standard (https://github.com/neuroscales/nifti-zarr#24-nifti-header).
+    Their own xyztc voxel size becomes [1,1,z,y,x] in dataset-scale, and [t,c,1,1,1] in multiscale-scale:
+    nifti.zattrs["VoxelSize"][:3]  ==  zattrs["multiscales"][0]["datasets"][0]["coordinateTransformations"][0]["scale"][2:5][::-1]
+    nifti.zattrs["VoxelSize"][3]   ==  zattrs["multiscales"][0]["coordinateTransformations"][0]["scale"][0]
+    nifti.zattrs["VoxelSize"][4]   ==  zattrs["multiscales"][0]["coordinateTransformations"][0]["scale"][1]
+
+    At the same time, we have the opposite use, following the language of the spec rather than its example, at HHMI
+    (https://github.com/AI-HHMI/miao/issues/25). Here, the dataset-scale is the voxel size, and the multiscale-scale
+    is an instrument-specific magnification.
+    This manifests as [z1, y1, x1] in dataset-scale and [z2, y2, x2] in multiscale-scale.
+
+    -- So what do we make of it?
+    Special-case t. If dataset-scale for t is 1, and multiscale-scale is non-1 *only* for t, go into legacy convention mode.
+    Don't special-case c because anything but 1.0 is nonsense anyway.
+
+    Return None if the metadata does not conform to the global-t-scale convention, otherwise the scale.
+    """
+    if "t" not in axes:
+        return None
+    t_index = axes.index("t")
+    identity_values = (PixelSize._default(), 0)
+    global_scale = global_transforms.scale_transform.scale
+    global_scale_non_t = global_scale[:t_index] + global_scale[t_index + 1 :]
+    if any(v not in identity_values for v in global_scale_non_t):
+        # Violates convention rule 1: global/multiscale-scale must be *only* t, otherwise identity
+        return None
+    for ds in multiscale["datasets"]:
+        try:
+            pixel_size_values = ds["coordinateTransformations"][0]["scale"]
+            if pixel_size_values[t_index] not in identity_values:
+                # Violates convention rule 2: all dataset-scale must be identity for t
+                return None
+        except (KeyError, TypeError, ValueError):
+            return None
+    return global_scale[t_index]
+
+
 def multiscale_graph_from_legacy(
     multiscale: OME_ZARR_MULTISCALE, *, name: str
-) -> Tuple[TransformGraph, NodeRef[CoordinateSystem], Optional[MultiscaleTransforms]]:
+) -> Tuple[TransformGraph, NodeRef[CoordinateSystem], Optional[float]]:
     multiscale_tf_list = multiscale.get("coordinateTransformations")
     try:
         global_transforms = MultiscaleTransforms.from_list(multiscale_tf_list)
@@ -401,26 +452,52 @@ def multiscale_graph_from_legacy(
     intrinsic_system = CoordinateSystem.from_ome_zarr(multiscale)
     intrinsic_system_ref = intrinsic_system.as_ref(name)
     graph = TransformGraph.single_isolated_system(intrinsic_system_ref)
-    bound_transform = None
+    global_t_scale: Optional[float] = None
     if global_transforms is not None:
-        # Store the multiscale-level transforms as a transform to a non-existent mock system.
-        # This allows Multiscale.to_ome_zarr to divide/subtract them back out of Scale.pixel_size/.translation
-        # for perfect metadata round-trip.
+        global_t_scale = global_t_scale_if_matches_legacy_convention(
+            multiscale, global_transforms, tuple(intrinsic_system.axes())
+        )
+        if (
+            global_t_scale
+            and 0 not in global_transforms.scale_transform.scale
+            and global_transforms.translation_transform is None
+        ):
+            # Contained no information besides global_t_scale - leave it out of the graph
+            return graph, intrinsic_system_ref, global_t_scale
+        elif global_t_scale:
+            # There is no conventional meaning of the global translation. Presumably it represents a shift relative
+            # to some external reference, so keep it in the graph as a genuine transform to another coordinate system.
+            # Replace t scale with identity in this case: The "global t-scale" convention means it's part of pixel size,
+            # not some scaling relative to an external reference. This way graph + scale metadata remain
+            # internally consistent (otherwise scale.pixel_size would duplicate the t-scale)
+            assert (
+                sum(v == global_t_scale for v in global_transforms.scale_transform.scale) == 1
+            ), f"dev error: {global_transforms.scale_transform.scale} doesn't actually use global-t convention"
+            scale_with_t_identity = ScaleTransform(
+                scale=tuple(
+                    PixelSize._default() if v == global_t_scale else v for v in global_transforms.scale_transform.scale
+                )
+            )
+            tfs = (
+                (scale_with_t_identity,)
+                if global_transforms.translation_transform is None
+                else (scale_with_t_identity, global_transforms.translation_transform)
+            )
+            global_transforms = MultiscaleTransforms(tfs)
         synthetic_external = _UnresolvedRef(name=f"{name}-external")
         try:
-            bound_sequence = global_transforms.bound(source=intrinsic_system_ref, target=synthetic_external)
-            assert isinstance(bound_sequence, MultiscaleTransforms), "should not change type"
-            bound_transform = bound_sequence
+            bound_transform = global_transforms.bound(source=intrinsic_system_ref, target=synthetic_external)
+            assert isinstance(bound_transform, MultiscaleTransforms), "should not change type"
             graph = TransformGraph([bound_transform])
         except ValueError:
             # E.g. mismatching number of axes between transforms and coordinate system
             warnings.warn(f"Invalid OME-Zarr metadata: Ignoring multiscale transforms: {multiscale_tf_list!r}.")
-    return graph, intrinsic_system_ref, bound_transform
+    return graph, intrinsic_system_ref, global_t_scale
 
 
 def scale_meta_from_dataset_transforms(
     axis_keys: Sequence[AxisKey],
-    global_transforms: Optional["MultiscaleTransforms"],
+    global_t_scale: Optional[float],
     relative_scale_pixel_size: PixelSize,
     transformations: Optional[OME_ZARR_TRANSFORMS],
 ) -> Tuple[PixelSize, Optional[Translation], Optional[Tuple[AxisKey, ...]], bool]:
@@ -431,20 +508,6 @@ def scale_meta_from_dataset_transforms(
         - translation (defaulting to None if invalid meta)
         - a tuple of axis keys where the `scale` transform was 0.0 (normally None, purely for metadata round-trip)
         - merged_t_scale: bool -- whether the global_transform's t-scale was assumed to mean pixel size along t
-
-    Special case / ambiguity: OME-Zarr 0.4 and 0.5 define the dataset scale as the pixel size, but the spec's own
-    primary example shows the pixel size along the time-axis only recorded in the global_transforms.
-    nifti-zarr formalises this as a standard (https://github.com/neuroscales/nifti-zarr#24-nifti-header).
-    Their own xyztc voxel size becomes [1,1,z,y,x] in dataset-scale, and [t,c,1,1,1] in multiscale-scale:
-    nifti.zattrs["VoxelSize"][:3]  ==  zattrs["multiscales"][0]["datasets"][0]["coordinateTransformations"][0]["scale"][2:5][::-1]
-    nifti.zattrs["VoxelSize"][3]   ==  zattrs["multiscales"][0]["coordinateTransformations"][0]["scale"][0]
-    nifti.zattrs["VoxelSize"][4]   ==  zattrs["multiscales"][0]["coordinateTransformations"][0]["scale"][1]
-    At the same time, we have the opposite use, following the language of the spec, at HHMI (https://github.com/AI-HHMI/miao/issues/25).
-    Here, the dataset-scale is the voxel size, and the multiscale-scale is an instrument-specific magnification.
-    This manifests as [z1, y1, x1] in dataset-scale and [z2, y2, x2] in multiscale-scale.
-    -- So what do we make of it?
-    Special-case t. We use dataset-scale as pixel size, but iff dataset-scale for t is 1, then use multiscale-scale.
-    Don't special-case c because anything but 1.0 is nonsense anyway.
     """
     if transformations is None:
         # Fine: OME-Zarr up to v0.3 didn't have coordinateTransformations
@@ -487,21 +550,12 @@ def scale_meta_from_dataset_transforms(
         return relative_scale_pixel_size, None, None, False
 
     dataset_t_scale_replaced_with_global = False
-    axes = list(axis_keys)
     pixel_size_values = list(dataset_transforms.scale_transform.scale)
-    if "t" in axes and global_transforms is not None:
-        # Special case for the "t pixel size in global transforms" convention.
-        # We only assume global t is t-pixel-size if all other indicators match
-        # (dataset t-scale is identity, global scale *only* defines t-scale)
-        t_index = axes.index("t")
-        dataset_t_scale = pixel_size_values[t_index]
-        global_scale = global_transforms.scale_transform.scale
-        global_scale_t = global_scale[t_index]
-        global_scale_non_t = global_scale[:t_index] + global_scale[t_index + 1 :]
-        noops = (PixelSize._default(), 0)
-        if dataset_t_scale in noops and all(v in noops for v in global_scale_non_t):
-            pixel_size_values[t_index] = global_scale_t
-            dataset_t_scale_replaced_with_global = True
+    if global_t_scale is not None:
+        # Special case for the "t pixel size stored in global transforms" convention.
+        # global_t_scale is the pixel size along t in this case.
+        assert "t" in axis_keys, "dev error: multiscale_graph_from_legacy misidentified global_t_scale convention"
+        pixel_size_values[list(axis_keys).index("t")] = global_t_scale
 
     scale_pixel_size = scale_to_pixel_size_with_normalized_zeros(pixel_size_values, axis_keys)
     scale_translation = (
