@@ -29,6 +29,7 @@ from clearscale._transforms._transform_types import (
     ScaleTransform,
     TranslationTransform,
 )
+from clearscale._transforms._to_from_spatial_relation import relation_to_transform
 
 __all__ = []
 """Transforms are not part of the public API yet"""

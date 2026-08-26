@@ -25,6 +25,7 @@ from typing import (
     ItemsView,
     KeysView,
     ValuesView,
+    Collection,
 )
 
 from clearscale._axis_values import (
@@ -42,6 +43,7 @@ from clearscale._axis_values import (
     AxisKey,
 )
 from clearscale._errors import NoSuchCoordinateSystemError
+from clearscale._spatial_relations import SpatialRelation
 from clearscale._transforms import (
     CoordinateSystemName,
     CoordinateSystem,
@@ -52,9 +54,9 @@ from clearscale._transforms import (
     PRE_TRANSFORMS_VERSIONS,
     Transform,
     _UnresolvedRef,
+    relation_to_transform,
 )
 from clearscale._services import ome_zarr, precomputed
-from clearscale._transforms._base import _ordered_unique_refs
 
 ScaleKey = str
 ValueType = TypeVar("ValueType", Shape, Factor, "Scale")
@@ -852,7 +854,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
 
         return cls(scales_items, _zero_scale_axes_by_key=zero_scale_axes_by_key)
 
-    def axes(self) -> Iterable[AxisKey]:
+    def axes(self) -> OrderedAxes:
         return self.first_value().shape.keys()
 
     def scaled_axes(self) -> Tuple[AxisKey, ...]:
@@ -883,30 +885,66 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             grouped[scale.shape].append(key)
         return {shape: tuple(keys) for shape, keys in grouped.items()}
 
-    def with_coordinate_systems_of(self, other: "Multiscale") -> "Multiscale":
-        inherited = tuple(t for t in other._transform_graph.transforms if not self._is_transform_path_bound(t))
-        substituted = tuple(
-            self._replace_transform_ref(t, other._intrinsic_ref, self._intrinsic_ref) for t in inherited
-        )
-        incoming_refs = tuple(
-            self._intrinsic_ref if ref == other._intrinsic_ref else ref
-            for ref in other._transform_graph.all_system_refs
-        )
-        incoming_names = {ref.name for ref in incoming_refs if ref != self._intrinsic_ref}
+    def with_coordinate_systems_of(
+        self, other: "Multiscale", *, derived_by: Optional[SpatialRelation] = None
+    ) -> "Multiscale":
+        """Transfer `other`'s coordinate systems onto self.
+        This is appropriate when self is derived from `other`.
+        Optionally provide `derived_by`: The relation by which self was derived from `other`."""
+        source_axes = tuple(other.axes())
+        target_axes = tuple(self.axes())
+        if derived_by is None:
+            if source_axes != target_axes:
+                raise ValueError(
+                    f"Cannot transfer coordinate systems from source with axes {source_axes!r} to Multiscale "
+                    f"with axes {target_axes!r}. Use `derived_by` to specify how the new axes were obtained. "
+                    f"E.g. `ProjectionTo(result_axes)` for inserted or dropped axes."
+                )
+        else:
+            derived_axes = derived_by.target_axes(source_axes)
+            if derived_axes != target_axes:
+                raise ValueError(
+                    f"Incompatible derivation: Provided {derived_by.__class__.__name__} would produce axes "
+                    f"{derived_axes!r} from {source_axes!r}, but this Multiscale has {target_axes!r}. {derived_by=!r}"
+                )
 
-        if not substituted and not incoming_names:
-            return self
-
-        existing_names = set(self.coordinate_systems)
+        # Exclude other's intrinsic name from collision check: Will either be rebased, or renamed
+        incoming_names = {ref.name for ref in other._transform_graph.all_system_refs if ref != other._intrinsic_ref}
+        existing_names = {ref.name for ref in self._transform_graph.all_system_refs}
         collisions = incoming_names & existing_names
         if collisions:
             raise ValueError(
-                f"Cannot port coordinate systems {collisions} into Multiscale that already has {existing_names}."
+                f"Cannot transfer coordinate systems {collisions} into Multiscale that already has {existing_names}."
             )
 
+        incoming_transforms = tuple(
+            t for t in other._transform_graph.transforms if not self._is_transform_path_bound(t)
+        )
+        if derived_by is None:
+            # Identity with other: rebase other's graph onto our intrinsic to avoid identity chaining
+            merged = tuple(
+                self._replace_transform_ref(t, other._intrinsic_ref, self._intrinsic_ref) for t in incoming_transforms
+            )
+        else:
+            incoming_with_unique_names = incoming_transforms
+            other_intrinsic_unique = other._intrinsic_ref
+            if other._intrinsic_ref.name in existing_names:
+                other_intrinsic_unique = self._make_ref_unique(other_intrinsic_unique, existing_names)
+                incoming_with_unique_names = tuple(
+                    self._replace_transform_ref(t, other._intrinsic_ref, other_intrinsic_unique)
+                    for t in incoming_transforms
+                )
+            derivation_transform = relation_to_transform(derived_by, source_axes)
+            merged = incoming_with_unique_names + (
+                derivation_transform.bound(source=other_intrinsic_unique, target=self._intrinsic_ref),
+            )
+
+        if not merged and not incoming_names:
+            return self
+
         new_graph = TransformGraph(
-            transforms=self._transform_graph.transforms + substituted,
-            system_refs=_ordered_unique_refs(self._transform_graph.all_system_refs + incoming_refs),
+            transforms=self._transform_graph.transforms + merged,
+            system_refs=self._transform_graph.system_refs,
         )
         return Multiscale(
             self.items(),
@@ -1020,3 +1058,12 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
     @staticmethod
     def _replace_transform_ref(t: Transform, old: NodeRef, new: NodeRef) -> Transform:
         return t.bound(source=new if t.source == old else t.source, target=new if t.target == old else t.target)
+
+    @staticmethod
+    def _make_ref_unique(old_ref: NodeRef[CoordinateSystem], exclude: Collection[str]):
+        if old_ref.name not in exclude:
+            return old_ref
+        i = 1
+        while (new_name := f"{old_ref.name}-{i}") in exclude:
+            i += 1
+        return old_ref.owner.as_ref(new_name)

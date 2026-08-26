@@ -1,3 +1,5 @@
+import re
+
 import pytest
 from clearscale import (
     BlueprintShapes,
@@ -248,6 +250,11 @@ def test_multiscale_ome_properties_separate_across_instances():
     assert ms1.ome is not ms2.ome
 
 
+def _with_intrinsic_system_name(ms: Multiscale, name: str) -> Multiscale:
+    """Creates modified `ms` *with empty graph*, so this helper must be used *before* other helpers that modify the graph"""
+    return Multiscale(ms.items(), _intrinsic_ref=ms._intrinsic_ref.owner.as_ref(name))
+
+
 def _with_extra_system(ms: Multiscale, name: str) -> Multiscale:
     """Attach one additional named coordinate system to `ms` via an identity edge from its intrinsic ref."""
     extra_ref = CoordinateSystem.without_semantics(tuple(ms.axes())).as_ref(name)
@@ -319,9 +326,51 @@ def test_multiscale_with_coordinate_systems_of_does_not_port_path_bound_transfor
     assert not any(Multiscale._is_transform_path_bound(t) for t in result._transform_graph.transforms)
 
 
-def test_multiscale_with_coordinate_systems_of_raises_on_name_collision():
+def test_multiscale_with_coordinate_systems_of_with_derivation_retains_other():
+    source_ms = _with_extra_system(_multiscale(), "world")
+
+    derived_ms = _multiscale()
+    result = derived_ms.with_coordinate_systems_of(source_ms, derived_by=Factor.identity(derived_ms.axes()))
+
+    assert source_ms._intrinsic_ref in result._transform_graph.all_system_refs
+    assert derived_ms._intrinsic_ref in result._transform_graph.all_system_refs
+    assert "world" in result.coordinate_systems
+
+
+def test_multiscale_with_coordinate_systems_of_with_derivation_renames_on_duplicate_intrinsic_system_name():
+    derived_ms = _with_intrinsic_system_name(_multiscale(), "physical")
+    source_ms = _with_intrinsic_system_name(_multiscale(), "physical")
+
+    result = derived_ms.with_coordinate_systems_of(source_ms, derived_by=Factor.identity(derived_ms.axes()))
+
+    assert len(result._transform_graph.all_system_refs) == 2
+    assert derived_ms._intrinsic_ref in result._transform_graph.all_system_refs
+    assert source_ms._intrinsic_ref not in result._transform_graph.all_system_refs
+    assert "physical" in result.coordinate_systems
+    assert "physical-1" in result.coordinate_systems
+
+
+def test_multiscale_with_coordinate_systems_of_rejects_differing_axes_without_derivation():
+    caller_ms = _multiscale("xy")
+    donor_ms = _multiscale("xyz")
+
+    with pytest.raises(
+        ValueError, match=re.escape("Cannot transfer coordinate systems from source with axes ('x', 'y', 'z')")
+    ):
+        caller_ms.with_coordinate_systems_of(donor_ms)
+
+
+def test_multiscale_with_coordinate_systems_of_rejects_mismatching_derivation():
+    caller_ms = _multiscale("xyz")
+    donor_ms = _multiscale("xyz")
+
+    with pytest.raises(ValueError, match="Incompatible axes/order"):
+        caller_ms.with_coordinate_systems_of(donor_ms, derived_by=Factor.identity("xy"))
+
+
+def test_multiscale_with_coordinate_systems_of_rejects_duplicate_external_system_name():
     caller_ms = _with_extra_system(_multiscale(), "world")
     donor_ms = _with_extra_system(_multiscale(), "world")
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Cannot transfer coordinate systems {'world'}"):
         caller_ms.with_coordinate_systems_of(donor_ms)
