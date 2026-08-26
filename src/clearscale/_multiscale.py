@@ -936,7 +936,19 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
                 derivation_transform.bound(source=other_intrinsic_unique, target=self._intrinsic_ref),
             )
 
-        if not merged and not incoming_names:
+        candidate_t_scale = self._legacy_convention_global_t_scale or (
+            "t" in self.axes() and other._legacy_convention_global_t_scale
+        )
+        transfers_cleanly = not candidate_t_scale or all(
+            scale.pixel_size["t"] == candidate_t_scale for scale in self.values()
+        )
+        transferred_global_t_scale = candidate_t_scale if transfers_cleanly else None
+
+        if (
+            not merged
+            and not incoming_names
+            and bool(transferred_global_t_scale) == bool(self._legacy_convention_global_t_scale)
+        ):
             return self
 
         new_graph = TransformGraph(
@@ -948,6 +960,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             _transform_graph=new_graph,
             _intrinsic_ref=self._intrinsic_ref,
             _zero_scale_axes_by_key=self._zero_scale_axes_by_key,
+            _legacy_convention_global_t_scale=transferred_global_t_scale,
         )
 
     # Ignore narrowing of `version: str` to Literal (nicer to be explicit)

@@ -326,6 +326,38 @@ def test_multiscale_with_coordinate_systems_of_does_not_port_path_bound_transfor
     assert not any(Multiscale._is_transform_path_bound(t) for t in result._transform_graph.transforms)
 
 
+def test_multiscale_with_coordinate_systems_of_transfers_t_scale_convention_even_when_graph_unchanged():
+    # caller pixel_size[t] == donor's global legacy t-scale. Satisfies that caller is really derived, so it should
+    # also follow donor's serialization convention.
+    caller_ms = Multiscale({"s0": Scale(shape=Shape(t=4, y=4, x=4), pixel_size=PixelSize(t=0.5, y=1.0, x=1.0))})
+    donor_ms = Multiscale({"s0": Scale(shape=Shape(t=4, y=4, x=4))}, _legacy_convention_global_t_scale=0.5)
+
+    result = caller_ms.with_coordinate_systems_of(donor_ms)
+
+    assert result is not caller_ms, "should not short-cut and return self"
+    assert caller_ms._legacy_convention_global_t_scale is None, "must not modify original"
+    assert result._legacy_convention_global_t_scale == 0.5
+
+
+def test_multiscale_with_coordinate_systems_of_does_not_port_t_scale_when_mismatching():
+    """
+    Calling with_coordinate_systems_of() claims caller and donor share a space, but caller's
+    pixel_size["t"] != donor's global t-scale. This is deliberately not an error and does not
+    get auto-corrected via an inferred Factor: fabricating a t-scale relationship from two
+    numbers that happen to both be named "t" would assert a registration fact nothing here
+    can actually verify. If the two really are related by a scale factor, the caller should
+    say so explicitly via `derived_by=Factor(t=...)`. Absent that, the convention just doesn't
+    transfer, same as other cases where the donor's metadata doesn't apply
+    (like path-bound transforms in the donor graph).
+    """
+    caller_ms = Multiscale({"s0": Scale(shape=Shape(t=4, y=4, x=4), pixel_size=PixelSize(t=0.9, y=1.0, x=1.0))})
+    donor_ms = Multiscale({"s0": Scale(shape=Shape(t=4, y=4, x=4))}, _legacy_convention_global_t_scale=0.5)
+
+    result = caller_ms.with_coordinate_systems_of(donor_ms)
+
+    assert result._legacy_convention_global_t_scale is None
+
+
 def test_multiscale_with_coordinate_systems_of_with_derivation_retains_other():
     source_ms = _with_extra_system(_multiscale(), "world")
 
