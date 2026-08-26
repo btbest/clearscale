@@ -143,7 +143,7 @@ class ScaleTransform(Transform):
         if not self.is_invertible:
             raise ValueError("ScaleTransform is not invertible: contains zero or unloaded scale value(s).")
         scale_inverted = tuple(1 / v for v in self.scale)
-        return replace(self, scale=scale_inverted, _ome_zarr_path=None)
+        return replace(self, scale=scale_inverted, _ome_zarr_path=None, source=self.target, target=self.source)
 
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
         if not isinstance(earlier, ScaleTransform):
@@ -234,7 +234,9 @@ class TranslationTransform(Transform):
         if not self.is_invertible:
             raise ValueError("TranslationTransform is not invertible: translation values are unloaded.")
         translation_inverted = tuple(-v for v in self.translation)
-        return replace(self, translation=translation_inverted, _ome_zarr_path=None)
+        return replace(
+            self, translation=translation_inverted, _ome_zarr_path=None, source=self.target, target=self.source
+        )
 
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
         if not isinstance(earlier, TranslationTransform):
@@ -716,7 +718,7 @@ class ProjectAxisTransform(Transform):
     def inverted(self) -> "Transform":
         if self.drops:
             raise ValueError(f"Axis dropping is not invertible. This transform drops axes {self.drops!r}.")
-        return replace(self, drops=self.inserts, source=self.target, target=self.source)
+        return replace(self, drops=self.inserts, inserts=(), source=self.target, target=self.source)
 
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
         """
