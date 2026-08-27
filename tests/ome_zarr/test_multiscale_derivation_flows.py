@@ -1,5 +1,5 @@
 from clearscale._multiscale import Multiscale
-from clearscale._spatial_relations import ProjectionTo
+from clearscale._spatial_relations import PermutationTo, ProjectionTo
 
 
 def _global_scale(result):
@@ -34,6 +34,78 @@ def test_full_flow_carries_axis_insertion_relation_into_legacy_output():
     assert "coordinateTransformations" not in result
     assert _dataset_scale(result, "s0") == [1.0, 1.0, 0.3, 20.0, 30.0]
     assert _dataset_scale(result, "s1") == [1.0, 1.0, 0.6, 40.0, 60.0]
+
+
+def test_full_flow_carries_axis_drop_relation_into_legacy_output():
+    raw_source = {
+        "version": "0.4",
+        "axes": [{"name": a} for a in "czyx"],
+        "datasets": [
+            {"path": "s0", "coordinateTransformations": [{"type": "scale", "scale": [1.0, 0.3, 20.0, 30.0]}]},
+        ],
+        "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0, 1.0, 1.0]}],
+    }
+    shapes = {"s0": (3, 4, 4, 4)}
+    source = Multiscale.from_ome_zarr(raw_source, shape_source=lambda p: shapes[p])
+    assert source._legacy_convention_global_t_scale is None
+
+    # Simulate selecting one channel and then dropping the c-axis
+    derived = Multiscale({key: source[key].with_axes("zyx") for key in source.keys()})
+    derived = derived.with_coordinate_systems_of(source, derived_by=ProjectionTo(derived.axes()))
+
+    result = derived.to_ome_zarr(version="0.4")
+
+    assert "coordinateTransformations" in result
+    assert _global_scale(result) == [1.0, 1.0, 1.0]
+    assert _dataset_scale(result, "s0") == [0.3, 20.0, 30.0]
+
+
+def test_full_flow_carries_combined_projection_and_permutation_relations_into_legacy_output():
+    raw_source = {
+        "version": "0.4",
+        "axes": [{"name": a} for a in "txyz"],
+        "datasets": [
+            {"path": "s0", "coordinateTransformations": [{"type": "scale", "scale": [5.0, 10.0, 20.0, 0.3]}]},
+        ],
+        "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0, 1.0, 1.0]}],
+    }
+    shapes = {"s0": (2, 4, 4, 4)}
+    source = Multiscale.from_ome_zarr(raw_source, shape_source=lambda p: shapes[p])
+
+    # Derived Multiscale: time dropped, channel inserted
+    derived = Multiscale({key: source[key].with_axes("czyx") for key in source.keys()})
+    relations = [ProjectionTo("cxyz"), PermutationTo("czyx")]
+    derived = derived.with_coordinate_systems_of(source, derived_by=relations)
+
+    result = derived.to_ome_zarr(version="0.4")
+
+    assert "coordinateTransformations" in result
+    assert _global_scale(result) == [1.0, 1.0, 1.0, 1.0]
+    assert _dataset_scale(result, "s0") == [1.0, 0.3, 20.0, 10.0]
+
+
+def test_full_flow_carries_axis_reordering_relation_into_legacy_output():
+    raw_source = {
+        "version": "0.4",
+        "axes": [{"name": a} for a in "czyx"],
+        "datasets": [
+            {"path": "s0", "coordinateTransformations": [{"type": "scale", "scale": [1.0, 0.2, 30.0, 40.0]}]},
+        ],
+        "coordinateTransformations": [{"type": "scale", "scale": [1.0, 2.0, 3.0, 4.0]}],
+    }
+    shapes = {"s0": (3, 4, 4, 4)}
+    source = Multiscale.from_ome_zarr(raw_source, shape_source=lambda p: shapes[p])
+    assert source._legacy_convention_global_t_scale is None
+
+    # Reorder axes only
+    derived = Multiscale({key: source[key].with_axes("xycz") for key in source.keys()})
+    derived = derived.with_coordinate_systems_of(source, derived_by=PermutationTo(derived.axes()))
+
+    result = derived.to_ome_zarr(version="0.4")
+
+    assert "coordinateTransformations" in result
+    assert _global_scale(result) == [4.0, 3.0, 1.0, 2.0]
+    assert _dataset_scale(result, "s0") == [40.0, 30.0, 1.0, 0.2]
 
 
 def test_full_flow_preserves_t_scale_convention_after_axis_insertion():

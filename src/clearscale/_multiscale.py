@@ -59,6 +59,7 @@ from clearscale._transforms import (
     TransformSequence,
     ProjectAxisTransform,
     TranslationTransform,
+    MapAxisTransform,
 )
 from clearscale._services import ome_zarr, precomputed
 
@@ -1121,22 +1122,44 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
 
         own_axes = tuple(self.axes())
         for t in candidates:
-            assert t.source is not None, "Should have no unbound transforms in graph"
-            path = self._transform_graph.path_between(self._intrinsic_ref, t.source, allow_inverse=True)
-            if path and self._is_pure_axis_projection(path):
-                return self._widened_multiscale_transforms(t, target_axes=own_axes)
+            assert isinstance(t.source, NodeRef), "All MultiscaleTransforms must have a Multiscale source"
+            if self._is_axis_reshaping_neighbor(t.source):
+                return self._reshaped_multiscale_transforms(t, target_axes=own_axes)
 
         return None
 
+    def _is_axis_reshaping_neighbor(self, other_ref: NodeRef) -> bool:
+        """
+        True if `other_ref` connects to `self` via a single transform that is purely axis-reshaping (inserts, drops, reorders).
+        We can't use path traversal because ProjectAxisTransforms are not invertible if they contain drops.
+        In the typical constellation:
+        `self <- projectAxis(drops) <- other_ref -> scale+[translation] -> external_system`
+        there is no path `self -> external_system`
+        only `external_system -> self` (which is not helpful because legacy formats can't serialize it).
+        """
+        return any(
+            {t.source, t.target} == {self._intrinsic_ref, other_ref} and self._is_pure_axis_reshape([t])
+            for t in self._transform_graph.transforms
+        )
+
     @staticmethod
-    def _is_pure_axis_projection(path: List["Transform"]) -> bool:
+    def _is_pure_axis_reshape(path: List["Transform"]) -> bool:
+        """True if `path` collapses to pure axis bookkeeping (drop/insert/reorder) with no
+        physical content (scale, translation, rotation) — safe to fold into a widened/narrowed
+        MultiscaleTransforms via with_axes, since nothing is being approximated away, only axes
+        that were never physically related to begin with."""
         if not path:
             return True
         collapsed = TransformSequence(tuple(path)).collapsed() if len(path) > 1 else path[0]
-        return isinstance(collapsed, IdentityTransform) or isinstance(collapsed, ProjectAxisTransform)
+        structural_types = (IdentityTransform, ProjectAxisTransform, MapAxisTransform)
+        if isinstance(collapsed, TransformSequence):
+            return all(isinstance(child, structural_types) for child in collapsed.transforms)
+        return isinstance(collapsed, structural_types)
 
     @staticmethod
-    def _widened_multiscale_transforms(t, *, target_axes) -> "ome_zarr.MultiscaleTransforms":
+    def _reshaped_multiscale_transforms(
+        t: ome_zarr.MultiscaleTransforms, *, target_axes: Tuple[AxisKey, ...]
+    ) -> "ome_zarr.MultiscaleTransforms":
         source_axes = tuple(t.source.owner.axes())
         scale = ome_zarr.scale_to_pixel_size_with_normalized_zeros(t.scale_transform.scale, source_axes).with_axes(
             target_axes
