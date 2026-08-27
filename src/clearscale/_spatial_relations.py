@@ -14,6 +14,28 @@ class SpatialRelation(ABC):
 
 
 @dataclass(frozen=True, slots=True)
+class PermutationTo(SpatialRelation):
+    _order: Tuple[AxisKey, ...]
+
+    def __init__(self, target_axes: OrderedAxes):
+        target_axes = tuple(target_axes)
+        if not target_axes:
+            raise ValueError("PermutationTo requires at least one axis.")
+        if len(set(target_axes)) != len(target_axes):
+            raise ValueError(f"target_axes must be unique. Received: {target_axes!r}")
+        object.__setattr__(self, "_order", target_axes)
+
+    def target_axes(self, source_axes: OrderedAxes) -> Tuple[AxisKey, ...]:
+        source_axes = tuple(source_axes)
+        if set(source_axes) != set(self._order):
+            raise ValueError(
+                f"PermutationTo cannot insert or drop axes, only reorder. "
+                f"Source axes {source_axes!r} are not the same set as target axes {self._order!r}."
+            )
+        return self._order
+
+
+@dataclass(frozen=True, slots=True)
 class ProjectionTo(SpatialRelation):
     _targets: Tuple[AxisKey, ...]
 

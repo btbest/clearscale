@@ -3,7 +3,7 @@
 `src/clearscale/`, in order from lowest to highest level:
 
 - `types.py` defines common types (AxisKey)
-- `_spatial_relations.py` defines the SpatialRelation base and simple non-mapping implementations (ProjectionTo)
+- `_spatial_relations.py` defines the SpatialRelation base and simple non-mapping implementations (PermutationTo, ProjectionTo)
 - `_axis_values.py` defines primitives (Shape, Unit, PixelSize, ...)
 - `_affines.py` defines nested AxisValues (Linear matrices, their Coefficient building block, and Affine container)
 - `_transforms` contains the new concepts from OME-Zarr 0.6. `_base.py` defines the transformation graph, transform base class and TransformSequence (which still interacts with the graph). `_transform_types.py` implements the various Transform subclasses according to the OME-Zarr 0.6 spec. The public API for users to interact with Transforms is the SpatialRelation.
