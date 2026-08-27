@@ -1,4 +1,5 @@
 import re
+from typing import List
 
 import pytest
 from clearscale import (
@@ -14,7 +15,21 @@ from clearscale import (
     BlueprintFactors,
     Factor,
 )
-from clearscale._transforms import CoordinateSystem, IdentityTransform, TransformGraph, _UnresolvedRef, FileRef, NodeRef
+from clearscale._transforms import (
+    CoordinateSystem,
+    IdentityTransform,
+    TransformGraph,
+    _UnresolvedRef,
+    FileRef,
+    NodeRef,
+    TransformSequence,
+    ProjectAxisTransform,
+    MapAxisTransform,
+    Transform,
+    ScaleTransform,
+    TranslationTransform,
+)
+from clearscale._spatial_relations import PermutationTo, ProjectionTo, SpatialRelation
 
 
 def _ref(axes: str, name: str) -> NodeRef[CoordinateSystem]:
@@ -406,3 +421,76 @@ def test_multiscale_with_coordinate_systems_of_rejects_duplicate_external_system
 
     with pytest.raises(ValueError, match="Cannot transfer coordinate systems {'world'}"):
         caller_ms.with_coordinate_systems_of(donor_ms)
+
+
+@pytest.mark.parametrize(
+    "derived_axes, relations, expected_transform_source_derived",
+    [
+        pytest.param("zyx", [Factor.identity("zyx")], ScaleTransform(scale=(1.0, 1.0, 1.0)), id="single-entry list"),
+        pytest.param(
+            "zyx",
+            [Factor.identity("zyx"), Translation.identity("zyx")],
+            TransformSequence(
+                (ScaleTransform(scale=(1.0, 1.0, 1.0)), TranslationTransform(translation=(0.0, 0.0, 0.0)))
+            ),
+            id="factor-translation",
+        ),
+        pytest.param(
+            "tyxz",
+            [ProjectionTo("tzyx"), PermutationTo("tyxz")],
+            TransformSequence((ProjectAxisTransform(inserts=(0,)), MapAxisTransform(map_axis=(0, 2, 3, 1)))),
+            id="insertion-permutation",
+        ),
+    ],
+)
+def test_multiscale_with_coordinate_systems_of_accepts_list_of_relations(
+    derived_axes: str, relations: List[SpatialRelation], expected_transform_source_derived: Transform
+):
+    source_ms = _with_extra_system(_multiscale("zyx"), "world")
+    derived_ms = _multiscale(derived_axes)  # matches the composed relations' end result
+
+    result = derived_ms.with_coordinate_systems_of(source_ms, derived_by=relations)
+
+    assert source_ms._intrinsic_ref in result._transform_graph.all_system_refs
+    assert "world" in result.coordinate_systems
+
+    expected_transform_bound = expected_transform_source_derived.bound(
+        source=source_ms._intrinsic_ref, target=derived_ms._intrinsic_ref
+    )
+    assert result._transform_graph.path_between(source_ms._intrinsic_ref, derived_ms._intrinsic_ref) == [
+        expected_transform_bound
+    ]
+
+    world_refs = tuple(ref for ref in source_ms._transform_graph.all_system_refs if ref.name == "world")
+    assert len(world_refs) == 1, "names must be unique inside the graph"
+    world = next(iter(world_refs))
+    expected_path_from_derived_to_world = [
+        expected_transform_bound.inverted(),
+        IdentityTransform(source=source_ms._intrinsic_ref, target=world),  # Identity inserted by _with_extra_system
+    ]
+    assert result._transform_graph.path_between(derived_ms._intrinsic_ref, world) == expected_path_from_derived_to_world
+
+
+def test_multiscale_with_coordinate_systems_of_relation_list_order_matters():
+    source_ms = _multiscale("zyx")
+    derived_ms = _multiscale("tyxz")
+    # Same two relations, reversed: PermutationTo can't apply first, source has no "t" yet.
+    relations = [PermutationTo("tyxz"), ProjectionTo("tzyx")]
+
+    with pytest.raises(ValueError, match="PermutationTo cannot insert or drop axes, only reorder"):
+        derived_ms.with_coordinate_systems_of(source_ms, derived_by=relations)
+
+
+def test_multiscale_with_coordinate_systems_of_rejects_mismatching_relation_list():
+    caller_ms = _multiscale("tyxz")
+    donor_ms = _multiscale("zyx")
+    # Composed chain lands on tzyx, not caller's tyxz.
+    relations = [ProjectionTo("tzyx"), PermutationTo("tzyx")]
+
+    with pytest.raises(
+        ValueError,
+        match=re.escape(
+            "Provided relation chain would produce axes ('t', 'z', 'y', 'x') from ('z', 'y', 'x'), but this Multiscale has ('t', 'y', 'x', 'z')"
+        ),
+    ):
+        caller_ms.with_coordinate_systems_of(donor_ms, derived_by=relations)

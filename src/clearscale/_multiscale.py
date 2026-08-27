@@ -54,7 +54,8 @@ from clearscale._transforms import (
     PRE_TRANSFORMS_VERSIONS,
     Transform,
     _UnresolvedRef,
-    relation_to_transform,
+    relation_chain_target_axes,
+    relations_to_transform,
     ScaleTransform,
     TransformSequence,
     ProjectAxisTransform,
@@ -887,26 +888,31 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         return {shape: tuple(keys) for shape, keys in grouped.items()}
 
     def with_coordinate_systems_of(
-        self, other: "Multiscale", *, derived_by: Optional[SpatialRelation] = None
+        self, other: "Multiscale", *, derived_by: Union[SpatialRelation, Sequence[SpatialRelation], None] = None
     ) -> "Multiscale":
-        """Transfer `other`'s coordinate systems onto self.
-        This is appropriate when self is derived from `other`.
-        Optionally provide `derived_by`: The relation by which self was derived from `other`."""
+        """Transfer `other`'s coordinate systems onto self. Appropriate when self is derived from `other`.
+        Optionally provide `derived_by`: the relation(s) by which self was derived from `other`, applied
+        left-to-right if more than one."""
+        relations: List[SpatialRelation] = (
+            [] if derived_by is None else [derived_by] if isinstance(derived_by, SpatialRelation) else list(derived_by)
+        )
         source_axes = tuple(other.axes())
         target_axes = tuple(self.axes())
-        if derived_by is None:
+
+        if not relations:
             if source_axes != target_axes:
                 raise ValueError(
                     f"Cannot transfer coordinate systems from source with axes {source_axes!r} to Multiscale "
                     f"with axes {target_axes!r}. Use `derived_by` to specify how the new axes were obtained. "
-                    f"E.g. `ProjectionTo(result_axes)` for inserted or dropped axes."
+                    f"E.g. `ProjectionTo(result_axes)` for inserted or dropped axes, `PermutationTo(result_axes)` "
+                    f"for reordering, or a list of both."
                 )
         else:
-            derived_axes = derived_by.target_axes(source_axes)
+            derived_axes = relation_chain_target_axes(relations, source_axes)
             if derived_axes != target_axes:
                 raise ValueError(
-                    f"Incompatible derivation: Provided {derived_by.__class__.__name__} would produce axes "
-                    f"{derived_axes!r} from {source_axes!r}, but this Multiscale has {target_axes!r}. {derived_by=!r}"
+                    f"Incompatible derivation: Provided relation chain would produce axes {derived_axes!r} "
+                    f"from {source_axes!r}, but this Multiscale has {target_axes!r}. {derived_by=!r}"
                 )
 
         # Exclude other's intrinsic name from collision check: Will either be rebased, or renamed
@@ -921,7 +927,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         incoming_transforms = tuple(
             t for t in other._transform_graph.transforms if not self._is_transform_path_bound(t)
         )
-        if derived_by is None:
+        if not relations:
             # Identity with other: rebase other's graph onto our intrinsic to avoid identity chaining
             merged = tuple(
                 self._replace_transform_ref(t, other._intrinsic_ref, self._intrinsic_ref) for t in incoming_transforms
@@ -935,7 +941,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
                     self._replace_transform_ref(t, other._intrinsic_ref, other_intrinsic_unique)
                     for t in incoming_transforms
                 )
-            derivation_transform = relation_to_transform(derived_by, source_axes)
+            derivation_transform = relations_to_transform(relations, source_axes)
             merged = incoming_with_unique_names + (
                 derivation_transform.bound(source=other_intrinsic_unique, target=self._intrinsic_ref),
             )
@@ -1160,6 +1166,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
     def _reshaped_multiscale_transforms(
         t: ome_zarr.MultiscaleTransforms, *, target_axes: Tuple[AxisKey, ...]
     ) -> "ome_zarr.MultiscaleTransforms":
+        assert isinstance(t.source, NodeRef), "All MultiscaleTransforms must have a Multiscale source"
         source_axes = tuple(t.source.owner.axes())
         scale = ome_zarr.scale_to_pixel_size_with_normalized_zeros(t.scale_transform.scale, source_axes).with_axes(
             target_axes
