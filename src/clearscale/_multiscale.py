@@ -887,15 +887,14 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             grouped[scale.shape].append(key)
         return {shape: tuple(keys) for shape, keys in grouped.items()}
 
-    def with_coordinate_systems_of(
-        self, other: "Multiscale", *, derived_by: Union[SpatialRelation, Sequence[SpatialRelation], None] = None
+    def as_derived_from(
+        self, other: "Multiscale", *, by: Union[SpatialRelation, Sequence[SpatialRelation], None] = None
     ) -> "Multiscale":
-        """Transfer `other`'s coordinate systems onto self. Appropriate when self is derived from `other`.
-        Optionally provide `derived_by`: the relation(s) by which self was derived from `other`, applied
-        left-to-right if more than one."""
-        relations: List[SpatialRelation] = (
-            [] if derived_by is None else [derived_by] if isinstance(derived_by, SpatialRelation) else list(derived_by)
-        )
+        """
+        Transfer the spatial context and serialization convention from `other`.
+        Optionally specify *how* `self` was derived from `other` using `by=Factor(...)` or other SpatialRelations.
+        """
+        relations: List[SpatialRelation] = [] if by is None else [by] if isinstance(by, SpatialRelation) else list(by)
         source_axes = tuple(other.axes())
         target_axes = tuple(self.axes())
 
@@ -903,7 +902,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             if source_axes != target_axes:
                 raise ValueError(
                     f"Cannot transfer coordinate systems from source with axes {source_axes!r} to Multiscale "
-                    f"with axes {target_axes!r}. Use `derived_by` to specify how the new axes were obtained. "
+                    f"with axes {target_axes!r}. Use `by` to specify how the new axes were obtained. "
                     f"E.g. `ProjectionTo(result_axes)` for inserted or dropped axes, `PermutationTo(result_axes)` "
                     f"for reordering, or a list of both."
                 )
@@ -912,7 +911,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             if derived_axes != target_axes:
                 raise ValueError(
                     f"Incompatible derivation: Provided relation chain would produce axes {derived_axes!r} "
-                    f"from {source_axes!r}, but this Multiscale has {target_axes!r}. {derived_by=!r}"
+                    f"from {source_axes!r}, but this Multiscale has {target_axes!r}. {by=!r}"
                 )
 
         # Exclude other's intrinsic name from collision check: Will either be rebased, or renamed

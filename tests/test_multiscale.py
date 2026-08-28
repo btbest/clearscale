@@ -287,22 +287,22 @@ def _with_path_bound_edge(ms: Multiscale, path: str) -> Multiscale:
     return Multiscale(ms.items(), _transform_graph=graph, _intrinsic_ref=ms._intrinsic_ref)
 
 
-def test_multiscale_with_coordinate_systems_of_replaces_intrinsic():
+def test_multiscale_as_derived_from_replaces_intrinsic():
     source_ms = _with_extra_system(_multiscale(), "world")
 
     derived_ms = _multiscale()
-    result = derived_ms.with_coordinate_systems_of(source_ms)
+    result = derived_ms.as_derived_from(source_ms)
 
     assert source_ms._intrinsic_ref not in result._transform_graph.all_system_refs
     assert derived_ms._intrinsic_ref in result._transform_graph.all_system_refs
     assert "world" in result.coordinate_systems
 
 
-def test_multiscale_with_coordinate_systems_of_does_not_accumulate_on_repetition():
+def test_multiscale_as_derived_from_does_not_accumulate_on_repetition():
     source_ms = _with_extra_system(_multiscale(), "world")
 
-    middle_ms = _multiscale().with_coordinate_systems_of(source_ms)
-    derived_ms = _multiscale().with_coordinate_systems_of(middle_ms)
+    middle_ms = _multiscale().as_derived_from(source_ms)
+    derived_ms = _multiscale().as_derived_from(middle_ms)
 
     assert source_ms._intrinsic_ref not in derived_ms._transform_graph.all_system_refs
     assert middle_ms._intrinsic_ref not in derived_ms._transform_graph.all_system_refs
@@ -310,85 +310,85 @@ def test_multiscale_with_coordinate_systems_of_does_not_accumulate_on_repetition
     assert "world" in derived_ms.coordinate_systems
 
 
-def test_multiscale_with_coordinate_systems_of_preserves_existing_systems_on_caller():
+def test_multiscale_as_derived_from_preserves_existing_systems_on_caller():
     caller_ms = _with_extra_system(_multiscale(), "caller_space")
     donor_ms = _with_extra_system(_multiscale(), "world")
 
-    result = caller_ms.with_coordinate_systems_of(donor_ms)
+    result = caller_ms.as_derived_from(donor_ms)
 
     assert "caller_space" in result.coordinate_systems
     assert "world" in result.coordinate_systems
 
 
-def test_multiscale_with_coordinate_systems_of_preserves_caller_on_noop():
+def test_multiscale_as_derived_from_preserves_caller_on_noop():
     caller_ms = _with_extra_system(_multiscale(), "only_space")
     donor_ms = _multiscale()  # plain, isolated: nothing to contribute
 
-    result = caller_ms.with_coordinate_systems_of(donor_ms)
+    result = caller_ms.as_derived_from(donor_ms)
 
     assert result is caller_ms
 
 
-def test_multiscale_with_coordinate_systems_of_does_not_port_path_bound_transforms():
+def test_multiscale_as_derived_from_does_not_port_path_bound_transforms():
     source_ms = _with_extra_system(_multiscale(), "world")
     source_ms = _with_path_bound_edge(source_ms, "labels")
 
     derived_ms = _multiscale()
-    result = derived_ms.with_coordinate_systems_of(source_ms)
+    result = derived_ms.as_derived_from(source_ms)
 
     assert "world" in result.coordinate_systems
     assert len(result._transform_graph.transforms) == 1
     assert not any(Multiscale._is_transform_path_bound(t) for t in result._transform_graph.transforms)
 
 
-def test_multiscale_with_coordinate_systems_of_transfers_t_scale_convention_even_when_graph_unchanged():
+def test_multiscale_as_derived_from_transfers_t_scale_convention_even_when_graph_unchanged():
     # caller pixel_size[t] == donor's global legacy t-scale. Satisfies that caller is really derived, so it should
     # also follow donor's serialization convention.
     caller_ms = Multiscale({"s0": Scale(shape=Shape(t=4, y=4, x=4), pixel_size=PixelSize(t=0.5, y=1.0, x=1.0))})
     donor_ms = Multiscale({"s0": Scale(shape=Shape(t=4, y=4, x=4))}, _legacy_convention_global_t_scale=0.5)
 
-    result = caller_ms.with_coordinate_systems_of(donor_ms)
+    result = caller_ms.as_derived_from(donor_ms)
 
     assert result is not caller_ms, "should not short-cut and return self"
     assert caller_ms._legacy_convention_global_t_scale is None, "must not modify original"
     assert result._legacy_convention_global_t_scale == 0.5
 
 
-def test_multiscale_with_coordinate_systems_of_does_not_port_t_scale_when_mismatching():
+def test_multiscale_as_derived_from_does_not_port_t_scale_when_mismatching():
     """
-    Calling with_coordinate_systems_of() claims caller and donor share a space, but caller's
+    Calling as_derived_from() claims caller and donor share a space, but caller's
     pixel_size["t"] != donor's global t-scale. This is deliberately not an error and does not
     get auto-corrected via an inferred Factor: fabricating a t-scale relationship from two
     numbers that happen to both be named "t" would assert a registration fact nothing here
     can actually verify. If the two really are related by a scale factor, the caller should
-    say so explicitly via `derived_by=Factor(t=...)`. Absent that, the convention just doesn't
+    say so explicitly via `by=Factor(t=...)`. Absent that, the convention just doesn't
     transfer, same as other cases where the donor's metadata doesn't apply
     (like path-bound transforms in the donor graph).
     """
     caller_ms = Multiscale({"s0": Scale(shape=Shape(t=4, y=4, x=4), pixel_size=PixelSize(t=0.9, y=1.0, x=1.0))})
     donor_ms = Multiscale({"s0": Scale(shape=Shape(t=4, y=4, x=4))}, _legacy_convention_global_t_scale=0.5)
 
-    result = caller_ms.with_coordinate_systems_of(donor_ms)
+    result = caller_ms.as_derived_from(donor_ms)
 
     assert result._legacy_convention_global_t_scale is None
 
 
-def test_multiscale_with_coordinate_systems_of_with_derivation_retains_other():
+def test_multiscale_as_derived_from_with_derivation_retains_other():
     source_ms = _with_extra_system(_multiscale(), "world")
 
     derived_ms = _multiscale()
-    result = derived_ms.with_coordinate_systems_of(source_ms, derived_by=Factor.identity(derived_ms.axes()))
+    result = derived_ms.as_derived_from(source_ms, by=Factor.identity(derived_ms.axes()))
 
     assert source_ms._intrinsic_ref in result._transform_graph.all_system_refs
     assert derived_ms._intrinsic_ref in result._transform_graph.all_system_refs
     assert "world" in result.coordinate_systems
 
 
-def test_multiscale_with_coordinate_systems_of_with_derivation_renames_on_duplicate_intrinsic_system_name():
+def test_multiscale_as_derived_from_with_derivation_renames_on_duplicate_intrinsic_system_name():
     derived_ms = _with_intrinsic_system_name(_multiscale(), "physical")
     source_ms = _with_intrinsic_system_name(_multiscale(), "physical")
 
-    result = derived_ms.with_coordinate_systems_of(source_ms, derived_by=Factor.identity(derived_ms.axes()))
+    result = derived_ms.as_derived_from(source_ms, by=Factor.identity(derived_ms.axes()))
 
     assert len(result._transform_graph.all_system_refs) == 2
     assert derived_ms._intrinsic_ref in result._transform_graph.all_system_refs
@@ -397,30 +397,30 @@ def test_multiscale_with_coordinate_systems_of_with_derivation_renames_on_duplic
     assert "physical-1" in result.coordinate_systems
 
 
-def test_multiscale_with_coordinate_systems_of_rejects_differing_axes_without_derivation():
+def test_multiscale_as_derived_from_rejects_differing_axes_without_derivation():
     caller_ms = _multiscale("xy")
     donor_ms = _multiscale("xyz")
 
     with pytest.raises(
         ValueError, match=re.escape("Cannot transfer coordinate systems from source with axes ('x', 'y', 'z')")
     ):
-        caller_ms.with_coordinate_systems_of(donor_ms)
+        caller_ms.as_derived_from(donor_ms)
 
 
-def test_multiscale_with_coordinate_systems_of_rejects_mismatching_derivation():
+def test_multiscale_as_derived_from_rejects_mismatching_derivation():
     caller_ms = _multiscale("xyz")
     donor_ms = _multiscale("xyz")
 
     with pytest.raises(ValueError, match="Incompatible axes/order"):
-        caller_ms.with_coordinate_systems_of(donor_ms, derived_by=Factor.identity("xy"))
+        caller_ms.as_derived_from(donor_ms, by=Factor.identity("xy"))
 
 
-def test_multiscale_with_coordinate_systems_of_rejects_duplicate_external_system_name():
+def test_multiscale_as_derived_from_rejects_duplicate_external_system_name():
     caller_ms = _with_extra_system(_multiscale(), "world")
     donor_ms = _with_extra_system(_multiscale(), "world")
 
     with pytest.raises(ValueError, match="Cannot transfer coordinate systems {'world'}"):
-        caller_ms.with_coordinate_systems_of(donor_ms)
+        caller_ms.as_derived_from(donor_ms)
 
 
 @pytest.mark.parametrize(
@@ -443,13 +443,13 @@ def test_multiscale_with_coordinate_systems_of_rejects_duplicate_external_system
         ),
     ],
 )
-def test_multiscale_with_coordinate_systems_of_accepts_list_of_relations(
+def test_multiscale_as_derived_from_accepts_list_of_relations(
     derived_axes: str, relations: List[SpatialRelation], expected_transform_source_derived: Transform
 ):
     source_ms = _with_extra_system(_multiscale("zyx"), "world")
     derived_ms = _multiscale(derived_axes)  # matches the composed relations' end result
 
-    result = derived_ms.with_coordinate_systems_of(source_ms, derived_by=relations)
+    result = derived_ms.as_derived_from(source_ms, by=relations)
 
     assert source_ms._intrinsic_ref in result._transform_graph.all_system_refs
     assert "world" in result.coordinate_systems
@@ -471,17 +471,17 @@ def test_multiscale_with_coordinate_systems_of_accepts_list_of_relations(
     assert result._transform_graph.path_between(derived_ms._intrinsic_ref, world) == expected_path_from_derived_to_world
 
 
-def test_multiscale_with_coordinate_systems_of_relation_list_order_matters():
+def test_multiscale_as_derived_from_relation_list_order_matters():
     source_ms = _multiscale("zyx")
     derived_ms = _multiscale("tyxz")
     # Same two relations, reversed: PermutationTo can't apply first, source has no "t" yet.
     relations = [PermutationTo("tyxz"), ProjectionTo("tzyx")]
 
     with pytest.raises(ValueError, match="PermutationTo cannot insert or drop axes, only reorder"):
-        derived_ms.with_coordinate_systems_of(source_ms, derived_by=relations)
+        derived_ms.as_derived_from(source_ms, by=relations)
 
 
-def test_multiscale_with_coordinate_systems_of_rejects_mismatching_relation_list():
+def test_multiscale_as_derived_from_rejects_mismatching_relation_list():
     caller_ms = _multiscale("tyxz")
     donor_ms = _multiscale("zyx")
     # Composed chain lands on tzyx, not caller's tyxz.
@@ -493,4 +493,4 @@ def test_multiscale_with_coordinate_systems_of_rejects_mismatching_relation_list
             "Provided relation chain would produce axes ('t', 'z', 'y', 'x') from ('z', 'y', 'x'), but this Multiscale has ('t', 'y', 'x', 'z')"
         ),
     ):
-        caller_ms.with_coordinate_systems_of(donor_ms, derived_by=relations)
+        caller_ms.as_derived_from(donor_ms, by=relations)
