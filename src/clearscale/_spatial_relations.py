@@ -69,3 +69,46 @@ class ProjectionTo(SpatialRelation):
                 f"Projection cannot reorder retained axes ({shared_source} -> {shared_target}). "
                 f"Source axes: {source_axes!r}; target axes: {self._targets!r}."
             )
+
+
+@dataclass(frozen=True, slots=True)
+class AxisRearrangementTo(SpatialRelation):
+    """Rearrange axes to a target ordering, inserting or dropping axes as needed."""
+
+    _targets: Tuple[AxisKey, ...]
+
+    def __init__(self, target_axes: OrderedAxes):
+        target_axes = tuple(target_axes)
+        if not target_axes:
+            raise ValueError("RearrangeAxesTo requires at least one axis.")
+        if len(set(target_axes)) != len(target_axes):
+            raise ValueError(f"target_axes must be unique. Received: {target_axes!r}")
+        object.__setattr__(self, "_targets", target_axes)
+
+    def target_axes(self, source_axes: OrderedAxes) -> Tuple[AxisKey, ...]:
+        self._require_unique_source_axes(source_axes)
+        return self._targets
+
+    def dropped_axes(self, source_axes: OrderedAxes) -> Tuple[AxisKey, ...]:
+        """Return dropped axes in source order."""
+        source_axes = tuple(source_axes)
+        self._require_unique_source_axes(source_axes)
+        return tuple(axis for axis in source_axes if axis not in self._targets)
+
+    def inserted_axes(self, source_axes: OrderedAxes) -> Tuple[AxisKey, ...]:
+        """Return inserted axes in target order."""
+        source_axes = tuple(source_axes)
+        self._require_unique_source_axes(source_axes)
+        return tuple(axis for axis in self._targets if axis not in source_axes)
+
+    def retained_axes(self, source_axes: OrderedAxes) -> Tuple[AxisKey, ...]:
+        """Return retained axes in source order."""
+        source_axes = tuple(source_axes)
+        self._require_unique_source_axes(source_axes)
+        return tuple(axis for axis in source_axes if axis in self._targets)
+
+    @staticmethod
+    def _require_unique_source_axes(source_axes: OrderedAxes) -> None:
+        source_axes = tuple(source_axes)
+        if len(set(source_axes)) != len(source_axes):
+            raise ValueError(f"source_axes must be unique. Received: {source_axes!r}")

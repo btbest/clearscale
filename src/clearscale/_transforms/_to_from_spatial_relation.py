@@ -1,7 +1,7 @@
 from typing import List, Sequence, Tuple
 
 from clearscale._axis_values import AxisKey, Factor, Translation
-from clearscale._spatial_relations import PermutationTo, ProjectionTo, SpatialRelation
+from clearscale._spatial_relations import PermutationTo, ProjectionTo, SpatialRelation, AxisRearrangementTo
 from clearscale._transforms._base import Transform, TransformSequence
 from clearscale._transforms._transform_types import (
     MapAxisTransform,
@@ -37,6 +37,19 @@ def relation_to_transform(relation: SpatialRelation, source_axes: OrderedAxes) -
     if isinstance(relation, PermutationTo):
         target_axes = relation.target_axes(source_axes)
         return MapAxisTransform(map_axis=tuple(source_axes.index(axis) for axis in target_axes))
+
+    if isinstance(relation, AxisRearrangementTo):
+        target_axes = relation.target_axes(source_axes)
+        if not relation.dropped_axes(source_axes) and not relation.inserted_axes(source_axes):
+            return relation_to_transform(PermutationTo(target_axes), source_axes)
+        try:
+            return relation_to_transform(ProjectionTo(target_axes), source_axes)
+        except ValueError:
+            pass
+        intermediate_axes = relation.retained_axes(source_axes) + relation.inserted_axes(source_axes)
+        project_axes = relation_to_transform(ProjectionTo(intermediate_axes), source_axes)
+        map_axis = relation_to_transform(PermutationTo(target_axes), intermediate_axes)
+        return TransformSequence((project_axes, map_axis))
 
     raise NotImplementedError(f"Conversion to Transform not yet implemented for {relation.__class__.__name__}")
 
