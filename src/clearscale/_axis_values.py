@@ -336,11 +336,6 @@ class Factor(_AxisFloats, SpatialRelation):
         Note: Factors act as divisors for shape (e.g. 1024 / 0.5 = 2048)."""
         return math.prod(self.values()) < 1
 
-    def inverted(self) -> "Factor":
-        """Axis-wise 1/factor."""
-        inverted_items = [(a, 1 / self[a]) for a in self]
-        return self.__class__(inverted_items)
-
     def __mul__(self, other: object) -> Union["Factor", "PixelSize", NotImplementedType]:
         if isinstance(other, Factor):
             _require_identical_axes(self, other)
@@ -362,6 +357,11 @@ class Factor(_AxisFloats, SpatialRelation):
     def with_identity_except(self, axes: Axes) -> "Factor":
         """Reset the values for all axes except `axes` to 1.0."""
         return super().with_default_except(axes)
+
+    def inverted(self) -> "Factor":
+        """Axis-wise 1/factor."""
+        inverted_items = [(a, 1 / self[a]) for a in self]
+        return self.__class__(inverted_items)
 
     def to_physical(self, base: "PixelSize") -> "PixelSize":
         """
@@ -536,6 +536,11 @@ class Translation(_AxisFloats, SpatialRelation):
     def with_identity_except(self, axes: Axes) -> "Translation":
         """Reset the values for all axes except `axes` to 0.0."""
         return super().with_default_except(axes)
+
+    def inverted(self) -> "Translation":
+        """Axis-wise translation * -1."""
+        inverted_items = [(a, -self[a]) for a in self]
+        return self.__class__(inverted_items)
 
     def to_pixel_offset(
         self,
