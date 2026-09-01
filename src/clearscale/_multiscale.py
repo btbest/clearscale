@@ -891,6 +891,41 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             grouped[scale.shape].append(key)
         return {shape: tuple(keys) for shape, keys in grouped.items()}
 
+    def with_coordinate_system(
+        self, name: str, *, reached_by: Union[SpatialRelation, Sequence[SpatialRelation], None] = None
+    ) -> "Multiscale":
+        relations = (
+            [] if reached_by is None else [reached_by] if isinstance(reached_by, SpatialRelation) else list(reached_by)
+        )
+        if not all(isinstance(r, SpatialRelation) for r in relations):
+            raise ValueError(
+                "How the new coordinate system is reached must be expressed using SpatialRelations "
+                'like `Factor`, `Translation` or AxisRearrangementTo("zyx").'
+            )
+
+        if name in self.coordinate_systems:
+            raise ValueError(f"Coordinate system name {name!r} already exists on this Multiscale.")
+
+        source_axes = tuple(self.axes())
+        target_axes = relation_chain_target_axes(relations, source_axes) if relations else source_axes
+
+        target_ref = CoordinateSystem.without_semantics(target_axes).as_ref(name)
+        transform = (relations_to_transform(relations, source_axes) if relations else IdentityTransform()).bound(
+            source=self._intrinsic_ref, target=target_ref
+        )
+
+        new_graph = TransformGraph(
+            transforms=self._transform_graph.transforms + (transform,),
+            system_refs=self._transform_graph.system_refs,
+        )
+        return Multiscale(
+            self.items(),
+            _transform_graph=new_graph,
+            _intrinsic_ref=self._intrinsic_ref,
+            _zero_scale_axes_by_key=self._zero_scale_axes_by_key,
+            _legacy_convention_global_t_scale=self._legacy_convention_global_t_scale,
+        )
+
     def as_derived_from(
         self, other: "Multiscale", *, by: Union[SpatialRelation, Sequence[SpatialRelation], None] = None
     ) -> "Multiscale":

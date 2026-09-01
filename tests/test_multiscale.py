@@ -29,7 +29,7 @@ from clearscale._transforms import (
     ScaleTransform,
     TranslationTransform,
 )
-from clearscale._spatial_relations import PermutationTo, ProjectionTo, SpatialRelation
+from clearscale._spatial_relations import PermutationTo, ProjectionTo, SpatialRelation, AxisRearrangementTo
 from clearscale._transforms._base import _is_owner_coordinate_system
 
 
@@ -560,3 +560,90 @@ def test_multiscale_as_derived_from_rejects_mismatching_relation_list():
         ),
     ):
         caller_ms.as_derived_from(donor_ms, by=relations)
+
+
+def test_multiscale_with_coordinate_system_identity():
+    ms = _multiscale("zyx")
+
+    result = ms.with_coordinate_system("world")
+
+    assert result is not ms
+    assert "world" in result.coordinate_systems
+    world_refs = [ref for ref in result._transform_graph.all_system_refs if ref.name == "world"]
+    assert len(world_refs) == 1
+    world = world_refs[0]
+    assert tuple(world.owner.axes()) == tuple(ms.axes())
+    assert len(result._transform_graph.transforms) == 1
+    assert IdentityTransform().bound(source=ms._intrinsic_ref, target=world) in result._transform_graph.transforms
+
+
+def test_multiscale_with_coordinate_system_accepts_single_relation():
+    ms = _multiscale("zyx")
+    relation = Factor(z=2.0, y=2.0, x=2.0)
+
+    result = ms.with_coordinate_system("world", reached_by=relation)
+
+    world = next(ref for ref in result._transform_graph.all_system_refs if ref.name == "world")
+    # We've said we reach the "world" coordinate system by scaling `ms` by Factor(2.0),
+    # i.e. we 2x *downscale* `ms` to overlay it in "world".
+    # In other words, `ms` is a 0.5 *upscale* of "world": `ms --Scale(0.5)-> world`
+    # or looking at coordinates: ms[2, 2, 2] == world[1, 1, 1]
+    expected = ScaleTransform((0.5, 0.5, 0.5)).bound(source=ms._intrinsic_ref, target=world)
+    assert expected in result._transform_graph.transforms
+
+
+def test_multiscale_with_coordinate_system_accepts_relation_sequence():
+    ms = _multiscale("zyx")
+    relations = [
+        AxisRearrangementTo("yx"),
+        Factor(y=2, x=2),
+        Translation(y=3, x=4),
+    ]
+
+    result = ms.with_coordinate_system("world", reached_by=relations)
+
+    world = next(ref for ref in result._transform_graph.all_system_refs if ref.name == "world")
+    assert tuple(world.owner.axes()) == ("y", "x")
+
+    # Factor/Translation have their values each inverted, but their order is not flipped.
+    # When specifying rearrange->factor->translation, the translation is already at "world" scale.
+    # Coordinate ms[0, 0, 0] == world[-3.0, -4.0]
+    # Coordinate ms[0, 1.0, 1.0] -> rearrange -> [1, 1] -> scale -> [0.5, 0.5] -> translate -> world[-2.5, -3.5]
+    # Coordinate ms[0, 10.0, 10.0] == world[2.0, 1.0]
+    expected = TransformSequence(
+        (
+            ProjectAxisTransform(drops=(0,)),
+            ScaleTransform((0.5, 0.5)),
+            TranslationTransform((-3.0, -4.0)),
+        )
+    ).bound(source=ms._intrinsic_ref, target=world)
+    assert expected in result._transform_graph.transforms
+
+
+def test_multiscale_with_coordinate_system_preserves_existing_graph():
+    original = _multiscale("zyx")
+    with_first = original.with_coordinate_system("first")
+    with_both = with_first.with_coordinate_system("second", reached_by=Factor(z=2, y=2, x=2))
+
+    assert "first" not in original.coordinate_systems
+    assert not original._transform_graph.transforms
+    assert set(with_both.coordinate_systems) == {"first", "second"}
+    assert len(with_both._transform_graph.transforms) == 2
+    assert with_first._transform_graph.transforms[0] in with_both._transform_graph.transforms
+
+
+def test_multiscale_with_coordinate_system_rejects_duplicate_name():
+    ms = _multiscale("zyx").with_coordinate_system("world")
+
+    with pytest.raises(ValueError, match="Coordinate system name 'world' already exists"):
+        ms.with_coordinate_system("world")
+
+
+def test_multiscale_with_coordinate_system_rejects_non_spatial_relations():
+    ms = _multiscale("zyx")
+
+    with pytest.raises(
+        ValueError,
+        match="How the new coordinate system is reached must be expressed using SpatialRelations",
+    ):
+        ms.with_coordinate_system("world", reached_by="not a relation")  # type: ignore[arg-type]
