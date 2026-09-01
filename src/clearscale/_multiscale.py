@@ -882,7 +882,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
     @cached_property
     def coordinate_systems(self) -> Tuple[str, ...]:
         """Spaces, other than the multiscale's own, into which it can be transformed."""
-        return tuple(ref.name for ref in self._transform_graph.all_system_refs)
+        return tuple(ref.name for ref in self._transform_graph.all_system_refs if ref is not self._intrinsic_ref)
 
     @cached_property
     def keys_by_shape(self) -> Mapping[Shape, Tuple[ScaleKey, ...]]:

@@ -266,6 +266,11 @@ def test_multiscale_ome_properties_separate_across_instances():
     assert ms1.ome is not ms2.ome
 
 
+def test_multiscale_coordinate_systems_empty_by_default():
+    ms = _multiscale()
+    assert ms.coordinate_systems == ()
+
+
 def _with_intrinsic_system_name(ms: Multiscale, name: str) -> Multiscale:
     """Creates modified `ms` *with empty graph*, so this helper must be used *before* other helpers that modify the graph"""
     return Multiscale(ms.items(), _intrinsic_ref=ms._intrinsic_ref.owner.as_ref(name))
@@ -286,6 +291,11 @@ def _with_path_bound_edge(ms: Multiscale, path: str) -> Multiscale:
     )
     graph = TransformGraph(transforms=ms._transform_graph.transforms + (edge,))
     return Multiscale(ms.items(), _transform_graph=graph, _intrinsic_ref=ms._intrinsic_ref)
+
+
+def test_multiscale_coordinate_systems_does_not_contain_own_intrinsic():
+    ms = _with_extra_system(_multiscale(), "world")
+    assert ms.coordinate_systems == ("world",)
 
 
 def test_multiscale_as_derived_from_replaces_intrinsic():
@@ -426,7 +436,7 @@ def test_multiscale_as_derived_from_with_derivation_renames_duplicate_intrinsic_
     assert len(result._transform_graph.all_system_refs) == 2
     assert derived_ms._intrinsic_ref in result._transform_graph.all_system_refs
     assert source_ms._intrinsic_ref not in result._transform_graph.all_system_refs
-    assert result.coordinate_systems == ("physical", "physical-1")
+    assert result.coordinate_systems == ("physical-1",)
 
 
 def test_multiscale_as_derived_from_retains_identically_named_but_distinct_external_systems():
