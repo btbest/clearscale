@@ -672,7 +672,11 @@ def _random_multiscale_name(seed: int | str | None = None) -> str:
 
 class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
     _transform_graph: TransformGraph
-    """Transform graph that by default consists only of one isolated node: _intrinsic_ref."""
+    """Transform graph that by default consists only of one isolated node: _intrinsic_ref.
+    The graph can acquire additional CoordinateSystems by .from_ome_zarr, or by derivation from a Multiscale that 
+    acquired them from_ome_zarr.
+    Transforms in Multiscale graphs may only source/target `NodeRef[CoordinateSystem]`, and the paths from 
+    self._intrinsic_ref to each satellite coordinate system must be a single Transform."""
     _intrinsic_ref: NodeRef[CoordinateSystem]
     """The system in which the Scales' shape, pixel size, translation etc. are correct."""
     _zero_scale_axes_by_key: Mapping[str, Tuple[AxisKey, ...]]
@@ -914,37 +918,6 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
                     f"from {source_axes!r}, but this Multiscale has {target_axes!r}. {by=!r}"
                 )
 
-        # Exclude other's intrinsic name from collision check: Will either be rebased, or renamed
-        incoming_names = {ref.name for ref in other._transform_graph.all_system_refs if ref != other._intrinsic_ref}
-        existing_names = {ref.name for ref in self._transform_graph.all_system_refs}
-        collisions = incoming_names & existing_names
-        if collisions:
-            raise ValueError(
-                f"Cannot transfer coordinate systems {collisions} into Multiscale that already has {existing_names}."
-            )
-
-        incoming_transforms = tuple(
-            t for t in other._transform_graph.transforms if not self._is_transform_path_bound(t)
-        )
-        if not relations:
-            # Identity with other: rebase other's graph onto our intrinsic to avoid identity chaining
-            merged = tuple(
-                self._replace_transform_ref(t, other._intrinsic_ref, self._intrinsic_ref) for t in incoming_transforms
-            )
-        else:
-            incoming_with_unique_names = incoming_transforms
-            other_intrinsic_unique = other._intrinsic_ref
-            if other._intrinsic_ref.name in existing_names:
-                other_intrinsic_unique = self._make_ref_unique(other_intrinsic_unique, existing_names)
-                incoming_with_unique_names = tuple(
-                    self._replace_transform_ref(t, other._intrinsic_ref, other_intrinsic_unique)
-                    for t in incoming_transforms
-                )
-            derivation_transform = relations_to_transform(relations, source_axes)
-            merged = incoming_with_unique_names + (
-                derivation_transform.bound(source=other_intrinsic_unique, target=self._intrinsic_ref),
-            )
-
         candidate_t_scale = self._legacy_convention_global_t_scale or (
             "t" in self.axes() and other._legacy_convention_global_t_scale
         )
@@ -952,16 +925,72 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             scale.pixel_size["t"] == candidate_t_scale for scale in self.values()
         )
         transferred_global_t_scale = candidate_t_scale if transfers_cleanly else None
+        unchanged_t_scale = bool(transferred_global_t_scale) == bool(self._legacy_convention_global_t_scale)
 
-        if (
-            not merged
-            and not incoming_names
-            and bool(transferred_global_t_scale) == bool(self._legacy_convention_global_t_scale)
+        existing_refs = list(self._transform_graph.all_system_refs)
+        other_unique = self._find_or_make_unique_ref(
+            other._intrinsic_ref.owner, other._intrinsic_ref.name, existing_refs
+        )
+        derivation = (relations_to_transform(relations, source_axes) if relations else IdentityTransform()).bound(
+            source=other_unique, target=self._intrinsic_ref
+        )
+        existing_refs.append(other_unique)
+
+        to_merge_list: List[Transform] = []
+        for satellite in other._transform_graph.all_system_refs:
+            resolved_ref = self._find_or_make_unique_ref(satellite.owner, satellite.name, existing_refs)
+            to_port = (
+                t
+                for t in other._transform_graph.transforms
+                if {satellite, other._intrinsic_ref} == {t.source, t.target}
+            )
+            for t in to_port:
+                # derivation is natively `self <--deriv-- other`
+                if t.target is satellite and derivation.is_invertible:
+                    # `self <--deriv--(>) other --t--> satellite` becomes `self --(deriv^-1)--t--> satellite` (preferred final direction)
+                    edge = (
+                        TransformSequence((derivation.inverted(), t))
+                        .collapsed()
+                        .bound(source=self._intrinsic_ref, target=resolved_ref)
+                    )
+                elif t.source is satellite:
+                    # `self <--deriv-- other <--t-- satellite` becomes `self <--deriv--t-- satellite` (prefer not inverting)
+                    edge = (
+                        TransformSequence((t, derivation))
+                        .collapsed()
+                        .bound(source=resolved_ref, target=self._intrinsic_ref)
+                    )
+                elif t.is_invertible:
+                    # `self <--deriv-- other (<)--t--> satellite` becomes `self <--deriv--(t^-1)-- satellite` (last resort)
+                    edge = (
+                        TransformSequence((t.inverted(), derivation))
+                        .collapsed()
+                        .bound(source=resolved_ref, target=self._intrinsic_ref)
+                    )
+                else:
+                    # `self <--deriv-- other --t--> satellite`
+                    # Can only be resolved if drops in deriv and t are a subset of each other. Edge case, skip.
+                    if relations:
+                        warnings.warn(
+                            f"Cannot carry over a connection to {satellite.name!r}: Both `by` and the transformation "
+                            "from the source to it lose information (e.g. by dropping axes)."
+                        )
+                    continue
+
+                if edge not in self._transform_graph.transforms + tuple(to_merge_list):
+                    existing_refs.append(resolved_ref)
+                    to_merge_list.append(edge)
+
+        if not isinstance(derivation, IdentityTransform) and derivation not in self._transform_graph.transforms + tuple(
+            to_merge_list
         ):
+            to_merge_list.append(derivation)
+        if not to_merge_list and unchanged_t_scale:
             return self
+        to_merge = tuple(to_merge_list)
 
         new_graph = TransformGraph(
-            transforms=self._transform_graph.transforms + merged,
+            transforms=self._transform_graph.transforms + to_merge,
             system_refs=self._transform_graph.system_refs,
         )
         return Multiscale(
@@ -1092,23 +1121,28 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         return IdentityTransform(source=self._intrinsic_ref, target=self.as_ref(self._intrinsic_ref.name))
 
     @staticmethod
-    def _is_transform_path_bound(t: Transform) -> bool:
-        """True for edges bound to another Multiscale's storage location (e.g. label overlays),
-        which must not be carried into a Multiscale at a different location."""
-        return any(isinstance(ref, _UnresolvedRef) and ref.file for ref in (t.source, t.target))
-
-    @staticmethod
     def _replace_transform_ref(t: Transform, old: NodeRef, new: NodeRef) -> Transform:
         return t.bound(source=new if t.source == old else t.source, target=new if t.target == old else t.target)
 
+    def _find_or_make_unique_ref(
+        self, owner: CoordinateSystem, requested_name: str, existing_refs: List[NodeRef]
+    ) -> NodeRef:
+        """Reuse an existing ref if `owner` is already known under any name; otherwise mint one
+        under `requested_name`, disambiguated only if that name is already taken by a *different* owner."""
+        for ref in existing_refs:
+            if ref.owner is owner:
+                return ref
+        existing_names = {ref.name for ref in existing_refs}
+        return owner.as_ref(self._make_unique_name(requested_name, existing_names))
+
     @staticmethod
-    def _make_ref_unique(old_ref: NodeRef[CoordinateSystem], exclude: Collection[str]):
-        if old_ref.name not in exclude:
-            return old_ref
+    def _make_unique_name(name: str, exclude: Collection[str]) -> str:
+        if name not in exclude:
+            return name
         i = 1
-        while (new_name := f"{old_ref.name}-{i}") in exclude:
+        while (candidate := f"{name}-{i}") in exclude:
             i += 1
-        return old_ref.owner.as_ref(new_name)
+        return candidate
 
     def _legacy_multiscale_transforms(self) -> Optional["ome_zarr.MultiscaleTransforms"]:
         """
@@ -1119,43 +1153,51 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         This padding is a deliberate approximation: the legacy format cannot express the ProjectAxisTransform
         itself, but MultiscaleTransforms along undefined axes are implicitly identities.
         """
-        candidates = [t for t in self._transform_graph.transforms if isinstance(t, ome_zarr.MultiscaleTransforms)]
+
+        def _is_raw_or_transferred_legacy(t: Transform):
+            if not isinstance(t, TransformSequence):
+                return False
+            # `.as_derived_from` can produce any TransformSequence with these at the end/front
+            if (
+                isinstance(t, ome_zarr.MultiscaleTransforms)
+                or (isinstance(t.transforms[-1], ome_zarr.MultiscaleTransforms))
+                or (isinstance(t.transforms[0], ome_zarr.InvertedMultiscaleTransforms))
+            ):
+                return True
+            return False
+
+        candidates = [t for t in self._transform_graph.transforms if _is_raw_or_transferred_legacy(t)]
 
         for t in candidates:
-            if t.source == self._intrinsic_ref:
+            if t.source == self._intrinsic_ref and isinstance(t, ome_zarr.MultiscaleTransforms):
                 return t
-
-        own_axes = tuple(self.axes())
         for t in candidates:
-            assert isinstance(t.source, NodeRef), "All MultiscaleTransforms must have a Multiscale source"
-            if self._is_axis_reshaping_neighbor(t.source):
-                return self._reshaped_multiscale_transforms(t, target_axes=own_axes)
+            if isinstance(t, ome_zarr.MultiscaleTransforms):
+                return t
+        for t in candidates:
+            assert isinstance(t, TransformSequence), "implied by _is_raw_or_transferred_legacy"
+            assert self._intrinsic_ref in {t.source, t.target}, "should never have two-hops in a Multiscale graph"
+            if isinstance(t.transforms[-1], ome_zarr.MultiscaleTransforms) and self._is_pure_axis_reshape(
+                t.transforms[:-1]
+            ):
+                return self._reshaped_multiscale_transforms(t[1], target_axes=tuple(self.axes()))
+            elif self._is_pure_axis_reshape(t.transforms[1:]):
+                assert isinstance(
+                    t[0], ome_zarr.InvertedMultiscaleTransforms
+                ), "expected as_derived_from to create this"
+                return self._reshaped_multiscale_transforms(t[0].inverted(), target_axes=tuple(self.axes()))
 
         return None
 
-    def _is_axis_reshaping_neighbor(self, other_ref: NodeRef) -> bool:
-        """
-        True if `other_ref` connects to `self` via a single transform that is purely axis-reshaping (inserts, drops, reorders).
-        We can't use path traversal because ProjectAxisTransforms are not invertible if they contain drops.
-        In the typical constellation:
-        `self <- projectAxis(drops) <- other_ref -> scale+[translation] -> external_system`
-        there is no path `self -> external_system`
-        only `external_system -> self` (which is not helpful because legacy formats can't serialize it).
-        """
-        return any(
-            {t.source, t.target} == {self._intrinsic_ref, other_ref} and self._is_pure_axis_reshape([t])
-            for t in self._transform_graph.transforms
-        )
-
     @staticmethod
-    def _is_pure_axis_reshape(path: List["Transform"]) -> bool:
-        """True if `path` collapses to pure axis bookkeeping (drop/insert/reorder) with no
-        physical content (scale, translation, rotation) — safe to fold into a widened/narrowed
-        MultiscaleTransforms via with_axes, since nothing is being approximated away, only axes
-        that were never physically related to begin with."""
-        if not path:
+    def _is_pure_axis_reshape(path: Tuple["Transform", ...]) -> bool:
+        """True if `path` is pure axis bookkeeping (drop/insert/reorder).
+        For legacy OME-Zarr, in this case a subsequent (scale[+translation]) can absorb the axis
+        rearrangement (_reshaped_multiscale_transforms), even if the format cannot express the
+        rearrangement itself."""
+        if len(path) < 1:
             return True
-        collapsed = TransformSequence(tuple(path)).collapsed() if len(path) > 1 else path[0]
+        collapsed = TransformSequence(path).collapsed() if len(path) > 1 else path[0]
         structural_types = (IdentityTransform, ProjectAxisTransform, MapAxisTransform)
         if isinstance(collapsed, TransformSequence):
             return all(isinstance(child, structural_types) for child in collapsed.transforms)

@@ -30,6 +30,7 @@ from clearscale._transforms import (
     TranslationTransform,
 )
 from clearscale._spatial_relations import PermutationTo, ProjectionTo, SpatialRelation
+from clearscale._transforms._base import _is_owner_coordinate_system
 
 
 def _ref(axes: str, name: str) -> NodeRef[CoordinateSystem]:
@@ -324,12 +325,13 @@ def test_multiscale_as_derived_from_preserves_caller_on_noop():
     caller_ms = _with_extra_system(_multiscale(), "only_space")
     donor_ms = _multiscale()  # plain, isolated: nothing to contribute
 
-    result = caller_ms.as_derived_from(donor_ms)
+    result = caller_ms.as_derived_from(donor_ms)  # no relation provided -> genuine noop
 
+    assert result == caller_ms
     assert result is caller_ms
 
 
-def test_multiscale_as_derived_from_does_not_port_path_bound_transforms():
+def test_multiscale_as_derived_from_only_ports_coordinate_systems():
     source_ms = _with_extra_system(_multiscale(), "world")
     source_ms = _with_path_bound_edge(source_ms, "labels")
 
@@ -338,7 +340,17 @@ def test_multiscale_as_derived_from_does_not_port_path_bound_transforms():
 
     assert "world" in result.coordinate_systems
     assert len(result._transform_graph.transforms) == 1
-    assert not any(Multiscale._is_transform_path_bound(t) for t in result._transform_graph.transforms)
+    non_coordinate_system_bound = [
+        t
+        for t in result._transform_graph.transforms
+        if (
+            t.source is None
+            or not _is_owner_coordinate_system(t.source)
+            or t.target is None
+            or not _is_owner_coordinate_system(t.target)
+        )
+    ]
+    assert not non_coordinate_system_bound
 
 
 def test_multiscale_as_derived_from_transfers_t_scale_convention_even_when_graph_unchanged():
@@ -373,7 +385,18 @@ def test_multiscale_as_derived_from_does_not_port_t_scale_when_mismatching():
     assert result._legacy_convention_global_t_scale is None
 
 
-def test_multiscale_as_derived_from_with_derivation_retains_other():
+def test_multiscale_as_derived_from_with_system_transferred_by_identity_does_not_retain_other():
+    source_ms = _with_extra_system(_multiscale(), "world")
+
+    derived_ms = _multiscale()
+    result = derived_ms.as_derived_from(source_ms)
+
+    assert source_ms._intrinsic_ref not in result._transform_graph.all_system_refs
+    assert derived_ms._intrinsic_ref in result._transform_graph.all_system_refs
+    assert "world" in result.coordinate_systems
+
+
+def test_multiscale_as_derived_from_with_system_transferred_by_derivation_retains_other():
     source_ms = _with_extra_system(_multiscale(), "world")
 
     derived_ms = _multiscale()
@@ -384,7 +407,17 @@ def test_multiscale_as_derived_from_with_derivation_retains_other():
     assert "world" in result.coordinate_systems
 
 
-def test_multiscale_as_derived_from_with_derivation_renames_on_duplicate_intrinsic_system_name():
+def test_multiscale_as_derived_from_with_no_system_transferred_but_derivation_retains_other():
+    source_ms = _multiscale()
+
+    derived_ms = _multiscale()
+    result = derived_ms.as_derived_from(source_ms, by=Factor.identity(derived_ms.axes()))
+
+    assert source_ms._intrinsic_ref in result._transform_graph.all_system_refs
+    assert derived_ms._intrinsic_ref in result._transform_graph.all_system_refs
+
+
+def test_multiscale_as_derived_from_with_derivation_renames_duplicate_intrinsic_system_name():
     derived_ms = _with_intrinsic_system_name(_multiscale(), "physical")
     source_ms = _with_intrinsic_system_name(_multiscale(), "physical")
 
@@ -393,8 +426,18 @@ def test_multiscale_as_derived_from_with_derivation_renames_on_duplicate_intrins
     assert len(result._transform_graph.all_system_refs) == 2
     assert derived_ms._intrinsic_ref in result._transform_graph.all_system_refs
     assert source_ms._intrinsic_ref not in result._transform_graph.all_system_refs
-    assert "physical" in result.coordinate_systems
-    assert "physical-1" in result.coordinate_systems
+    assert result.coordinate_systems == ("physical", "physical-1")
+
+
+def test_multiscale_as_derived_from_retains_identically_named_but_distinct_external_systems():
+    caller_ms = _with_extra_system(_multiscale(), "world")
+    donor_ms = _with_extra_system(_multiscale(), "world")
+
+    result = caller_ms.as_derived_from(donor_ms)
+
+    assert "world" in result.coordinate_systems
+    assert "world-1" in result.coordinate_systems
+    assert donor_ms._intrinsic_ref not in result._transform_graph.all_system_refs
 
 
 def test_multiscale_as_derived_from_rejects_differing_axes_without_derivation():
@@ -415,17 +458,10 @@ def test_multiscale_as_derived_from_rejects_mismatching_derivation():
         caller_ms.as_derived_from(donor_ms, by=Factor.identity("xy"))
 
 
-def test_multiscale_as_derived_from_rejects_duplicate_external_system_name():
-    caller_ms = _with_extra_system(_multiscale(), "world")
-    donor_ms = _with_extra_system(_multiscale(), "world")
-
-    with pytest.raises(ValueError, match="Cannot transfer coordinate systems {'world'}"):
-        caller_ms.as_derived_from(donor_ms)
-
-
 @pytest.mark.parametrize(
-    "derived_axes, relations, expected_transform_source_derived",
+    "derived_axes, relations, expected_derivation_transform",
     [
+        pytest.param("zyx", [], IdentityTransform(), id="empty list"),
         pytest.param("zyx", [Factor.identity("zyx")], ScaleTransform(scale=(1.0, 1.0, 1.0)), id="single-entry list"),
         pytest.param(
             "zyx",
@@ -444,31 +480,41 @@ def test_multiscale_as_derived_from_rejects_duplicate_external_system_name():
     ],
 )
 def test_multiscale_as_derived_from_accepts_list_of_relations(
-    derived_axes: str, relations: List[SpatialRelation], expected_transform_source_derived: Transform
+    derived_axes: str, relations: List[SpatialRelation], expected_derivation_transform: Transform
 ):
-    source_ms = _with_extra_system(_multiscale("zyx"), "world")
-    derived_ms = _multiscale(derived_axes)  # matches the composed relations' end result
+    source_axes = "zyx"
+    # source_ms -> world is IdentityTransform
+    source_ms = _with_extra_system(_multiscale(source_axes), "world")
+    derived_ms = _multiscale(derived_axes)
 
     result = derived_ms.as_derived_from(source_ms, by=relations)
 
-    assert source_ms._intrinsic_ref in result._transform_graph.all_system_refs
     assert "world" in result.coordinate_systems
-
-    expected_transform_bound = expected_transform_source_derived.bound(
-        source=source_ms._intrinsic_ref, target=derived_ms._intrinsic_ref
-    )
-    assert result._transform_graph.path_between(source_ms._intrinsic_ref, derived_ms._intrinsic_ref) == [
-        expected_transform_bound
-    ]
-
     world_refs = tuple(ref for ref in source_ms._transform_graph.all_system_refs if ref.name == "world")
     assert len(world_refs) == 1, "names must be unique inside the graph"
     world = next(iter(world_refs))
-    expected_path_from_derived_to_world = [
-        expected_transform_bound.inverted(),
-        IdentityTransform(source=source_ms._intrinsic_ref, target=world),  # Identity inserted by _with_extra_system
-    ]
-    assert result._transform_graph.path_between(derived_ms._intrinsic_ref, world) == expected_path_from_derived_to_world
+    assert derived_ms._intrinsic_ref in result._transform_graph.all_system_refs
+    assert world in result._transform_graph.all_system_refs
+    # We store `source_ms --derivation_t--> derived_ms` only if derivation isn't identity
+    expected_n_transforms = 1 if not relations else 2
+    assert len(result._transform_graph.transforms) == expected_n_transforms
+    if relations:
+        assert (
+            expected_derivation_transform.bound(source=source_ms._intrinsic_ref, target=derived_ms._intrinsic_ref)
+            in result._transform_graph.transforms
+        )
+    # Maybe slightly counterintuitive, but the expected
+    # `derived_ms -> world` is the derivation *inverted*:
+    # The derivation tells us how derived_ms was made from source_ms:
+    # `source_ms --derivation_t--> derived_ms`
+    # but source_ms has `source_ms -(identity)-> world`, hence
+    # `derived_ms -derivation_t.inverted-> source_ms -(identity)-> world`
+    # (with identity dropping out by composition).
+    # At least as long as the derivation itself is invertible.
+    expected_t_inverted = expected_derivation_transform.inverted()
+    assert (
+        expected_t_inverted.bound(source=derived_ms._intrinsic_ref, target=world) in result._transform_graph.transforms
+    )
 
 
 def test_multiscale_as_derived_from_relation_list_order_matters():

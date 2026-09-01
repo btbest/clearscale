@@ -185,6 +185,10 @@ def _as_transform_list(ome_transformations: Optional[OME_ZARR_TRANSFORMS]) -> Li
 
 @dataclass(frozen=True, slots=True)
 class MultiscaleTransforms(TransformSequence):
+    def inverted(self) -> "InvertedMultiscaleTransforms":
+        sup = super().inverted()
+        return InvertedMultiscaleTransforms(transforms=sup.transforms).bound(source=self.target, target=self.source)
+
     def __post_init__(self):
         if len(self.transforms) not in (1, 2):
             raise ValueError("MultiscaleTransforms requires one or two transforms.")
@@ -299,6 +303,17 @@ class MultiscaleTransforms(TransformSequence):
             target=self._composed_target(earlier),
             transforms=transforms,
         )
+
+
+class InvertedMultiscaleTransforms(TransformSequence):
+    """Alias purely to roundtrip inversion while maintaining a recognisable legacy marker class."""
+
+    def inverted(self) -> "MultiscaleTransforms":
+        sup = super().inverted()
+        return MultiscaleTransforms(transforms=sup.transforms).bound(source=self.target, target=self.source)
+
+    def composed_with(self, earlier: "Transform") -> Optional["InvertedMultiscaleTransforms"]:
+        return None  # Avoid folding into other TransformSequences
 
 
 def require_dataset_paths(raw: Mapping[str, Any]):
@@ -484,7 +499,8 @@ def multiscale_graph_from_legacy(
                 else (scale_with_t_identity, global_transforms.translation_transform)
             )
             global_transforms = MultiscaleTransforms(tfs)
-        synthetic_external = _UnresolvedRef(name=f"{name}-external")
+        own_axes = tuple(intrinsic_system.axes())
+        synthetic_external = CoordinateSystem.without_semantics(own_axes).as_ref(f"external-{name}")
         try:
             bound_transform = global_transforms.bound(source=intrinsic_system_ref, target=synthetic_external)
             assert isinstance(bound_transform, MultiscaleTransforms), "should not change type"

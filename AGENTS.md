@@ -28,6 +28,7 @@ Lower-level modules must not import higher-level modules.
 - It should be impossible to produce invalid output metadata, and as hard as possible to produce (semantically) incorrect but valid output metadata.
 - When reading metadata, be as permissive as possible. Error only if necessary information is missing or ambiguous.
 - Avoid modelling concepts that cannot be represented in standardised metadata formats (i.e. OME-Zarr).
+- Similarly, methods should not by design create states or constellations that cannot be serialised.
 
 ## Public APIs
 

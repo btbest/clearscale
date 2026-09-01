@@ -628,7 +628,7 @@ class TransformSequence(Transform):
             return None
         source = self._composed_source(earlier)
         target = self._composed_target(earlier)
-        if isinstance(earlier, TransformSequence):
+        if type(earlier) is TransformSequence:
             return replace(
                 earlier,
                 transforms=tuple(earlier.transforms + self.transforms),
