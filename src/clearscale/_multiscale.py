@@ -899,6 +899,11 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         Optionally specify *how* `self` was derived from `other` using `by=Factor(...)` or other SpatialRelations.
         """
         relations: List[SpatialRelation] = [] if by is None else [by] if isinstance(by, SpatialRelation) else list(by)
+        if not all(isinstance(r, SpatialRelation) for r in relations):
+            raise ValueError(
+                "The derivation relationship must be expressed using SpatialRelations like Factor,"
+                'Translation or AxisRearrangementTo("zyx").'
+            )
         source_axes = tuple(other.axes())
         target_axes = tuple(self.axes())
 

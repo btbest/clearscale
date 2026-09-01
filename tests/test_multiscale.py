@@ -450,6 +450,16 @@ def test_multiscale_as_derived_from_rejects_differing_axes_without_derivation():
         caller_ms.as_derived_from(donor_ms)
 
 
+def test_multiscale_as_derived_from_rejects_derivation_not_relation_instance():
+    caller_ms = _multiscale("xyz")
+    donor_ms = _multiscale("xyz")
+
+    with pytest.raises(
+        ValueError, match=re.escape("The derivation relationship must be expressed using SpatialRelations")
+    ):
+        caller_ms.as_derived_from(donor_ms, by="not a relation")  # type: ignore[arg-type]
+
+
 def test_multiscale_as_derived_from_rejects_mismatching_derivation():
     caller_ms = _multiscale("xyz")
     donor_ms = _multiscale("xyz")
