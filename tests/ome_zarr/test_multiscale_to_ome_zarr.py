@@ -1,5 +1,5 @@
 import pytest
-from clearscale._axis_values import PixelSize, Shape
+from clearscale._axis_values import PixelSize, Shape, Factor, Translation
 from clearscale._multiscale import Multiscale, Scale
 
 
@@ -10,8 +10,13 @@ def _multiscale(axes, size=4, pixel_size=None):
 
 
 def _global_scale(result):
-    (scale_dict,) = [t for t in result.get("coordinateTransformations", []) if t["type"] == "scale"]
-    return scale_dict["scale"]
+    scale_dicts = [t for t in result.get("coordinateTransformations", []) if t["type"] == "scale"]
+    return scale_dicts[0]["scale"]
+
+
+def _global_scale_and_translation(result):
+    translation_dicts = [t for t in result.get("coordinateTransformations", []) if t["type"] == "translation"]
+    return _global_scale(result), translation_dicts[0]["translation"] if translation_dicts else None
 
 
 def _dataset_scale(result, key="s0"):
@@ -53,3 +58,23 @@ def test_multiscale_to_ome_zarr_falls_back_on_nonuniform_t_scale():
     assert "coordinateTransformations" not in result
     assert _dataset_scale(result, "s0") == [0.5, 0.3, 20.0, 30.0]
     assert _dataset_scale(result, "s1") == [0.9, 0.6, 40.0, 60.0]
+
+
+@pytest.mark.parametrize(
+    "relation, expected_global_scale_and_translation",
+    [
+        (Factor(y=2, x=2), ([0.5, 0.5], None)),
+        (Translation(y=3, x=4), ([1.0, 1.0], [-3.0, -4.0])),
+        ([Factor(y=2, x=2), Translation(y=3, x=4)], ([0.5, 0.5], [-3.0, -4.0])),
+        ([Translation(y=3, x=4), Factor(y=2, x=2)], ([2.0, 2.0], [3.0, 4.0])),
+    ],
+)
+def test_multiscale_to_ome_zarr_serializes_compatible_coordinate_system_as_legacy_transforms(
+    relation, expected_global_scale_and_translation
+):
+    ms = _multiscale("yx").with_coordinate_system("world", reached_by=relation)
+
+    result = ms.to_ome_zarr(version="0.4")
+
+    assert "coordinateTransformations" in result
+    assert _global_scale_and_translation(result) == expected_global_scale_and_translation

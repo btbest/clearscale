@@ -1195,6 +1195,11 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         """
 
         def _is_raw_or_transferred_legacy(t: Transform):
+            try:
+                ome_zarr.MultiscaleTransforms.from_transforms((t,))
+                return True
+            except ValueError:
+                pass
             if not isinstance(t, TransformSequence):
                 return False
             # `.as_derived_from` can produce any TransformSequence with these at the end/front
@@ -1215,7 +1220,8 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             if isinstance(t, ome_zarr.MultiscaleTransforms):
                 return t
         for t in candidates:
-            assert isinstance(t, TransformSequence), "implied by _is_raw_or_transferred_legacy"
+            if not isinstance(t, TransformSequence):
+                continue
             assert self._intrinsic_ref in {t.source, t.target}, "should never have two-hops in a Multiscale graph"
             if isinstance(t.transforms[-1], ome_zarr.MultiscaleTransforms) and self._is_pure_axis_reshape(
                 t.transforms[:-1]
@@ -1226,7 +1232,11 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
                     t[0], ome_zarr.InvertedMultiscaleTransforms
                 ), "expected as_derived_from to create this"
                 return self._reshaped_multiscale_transforms(t[0].inverted(), target_axes=tuple(self.axes()))
-
+        for t in candidates:
+            try:
+                return ome_zarr.MultiscaleTransforms.from_transforms((t,))
+            except ValueError:
+                continue
         return None
 
     @staticmethod

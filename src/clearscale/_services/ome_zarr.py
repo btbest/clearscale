@@ -274,6 +274,38 @@ class MultiscaleTransforms(TransformSequence):
             scale = ScaleTransform(scale=tuple(1.0 for _ in range(ndim[0])))
         return cls(transforms=(scale,) if translation is None else (scale, translation))
 
+    @classmethod
+    def from_transforms(cls, transforms: Tuple["Transform", ...]) -> "MultiscaleTransforms":
+        if len(transforms) == 1:
+            t = transforms[0]
+            if isinstance(t, MultiscaleTransforms):
+                return t
+            if isinstance(t, InvertedMultiscaleTransforms):
+                return t.inverted()
+            if isinstance(t, ScaleTransform):
+                return MultiscaleTransforms((t,)).bound(source=t.source, target=t.target)
+            if isinstance(t, TranslationTransform):
+                identity_scale = ScaleTransform((1.0,) * len(t.translation))
+                return MultiscaleTransforms((identity_scale, t)).bound(source=t.source, target=t.target)
+            if isinstance(t, TransformSequence):
+                try:
+                    return cls.from_transforms(t.transforms).bound(source=t.source, target=t.target)
+                except ValueError:
+                    raise ValueError(f"Cannot represent as (scale[, translation]): {transforms}") from None
+        if (
+            len(transforms) == 2
+            and isinstance(transforms[0], ScaleTransform)
+            and isinstance(transforms[1], TranslationTransform)
+        ):
+            return MultiscaleTransforms(tuple(transforms))
+        if (
+            len(transforms) == 2
+            and isinstance(transforms[1], ScaleTransform)
+            and isinstance(transforms[0], TranslationTransform)
+        ):
+            return InvertedMultiscaleTransforms(tuple(transforms)).inverted()
+        raise ValueError(f"Cannot represent as (scale[, translation]): {transforms}")
+
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
         if not isinstance(earlier, MultiscaleTransforms):
             return None
@@ -439,6 +471,8 @@ def global_t_scale_if_matches_legacy_convention(
     identity_values = (PixelSize._default(), 0)
     global_scale = global_transforms.scale_transform.scale
     global_scale_non_t = global_scale[:t_index] + global_scale[t_index + 1 :]
+    if global_scale[t_index] in identity_values:
+        return None
     if any(v not in identity_values for v in global_scale_non_t):
         # Violates convention rule 1: global/multiscale-scale must be *only* t, otherwise identity
         return None
