@@ -19,11 +19,18 @@ def relation_to_transform(relation: SpatialRelation, source_axes: OrderedAxes) -
 
     if isinstance(relation, Factor):
         _ensure_compatible = relation.target_axes(source_axes)
-        return ScaleTransform(scale=tuple(relation.values()))
+        # Inversion: When acting as a SpatialRelation (an image operation), the Factor is
+        # exactly the inverse of what the coordinate transformation needs to be.
+        # `derived_ms = B.as_derived_from(A, by=Factor(x=2.0))`
+        # But if downscaling A by Factor(2.0) produces B, then A[2, 2] == B[1, 1],
+        # i.e. to obtain B-coordinates, A-coordinates must be halved.
+        # hence, A--Factor(2.0)-->B is the coordinate transform A--Scale(0.5)-->B
+        return ScaleTransform(scale=tuple(relation.inverted().values()))
 
     if isinstance(relation, Translation):
         _ensure_compatible = relation.target_axes(source_axes)
-        return TranslationTransform(translation=tuple(relation.values()))
+        # Inversion: same as for Factor
+        return TranslationTransform(translation=tuple(relation.inverted().values()))
 
     if isinstance(relation, ProjectionTo):
         target_axes = relation.target_axes(source_axes)
