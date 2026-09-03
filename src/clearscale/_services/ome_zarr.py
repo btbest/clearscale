@@ -495,7 +495,7 @@ def global_t_scale_if_matches_legacy_convention(
 
 def multiscale_graph_from_legacy(
     multiscale: OME_ZARR_MULTISCALE, *, name: str
-) -> Tuple[TransformGraph, NodeRef[CoordinateSystem], Optional[Tuple[float, MultiscaleTransforms]]]:
+) -> Tuple[TransformGraph, NodeRef[CoordinateSystem], Optional[Tuple[float, Optional[TranslationTransform]]]]:
     """
     Convert legacy metadata into modern coordinate graph interpretation.
     Returns graph, intrinsic ref, and None or a tuple of (pixel_size[t], global_transforms_to_fold).
@@ -527,17 +527,7 @@ def multiscale_graph_from_legacy(
             assert (
                 sum(v == global_t_scale for v in global_transforms.scale_transform.scale) == 1
             ), f"dev error: {global_transforms.scale_transform.scale} doesn't actually use global-t convention"
-            scale_with_t_identity = ScaleTransform(
-                scale=tuple(
-                    PixelSize._default() if v == global_t_scale else v for v in global_transforms.scale_transform.scale
-                )
-            )
-            tfs = (
-                (scale_with_t_identity,)
-                if global_transforms.translation_transform is None
-                else (scale_with_t_identity, global_transforms.translation_transform)
-            )
-            return graph, intrinsic_system_ref, (global_t_scale, MultiscaleTransforms(tfs))
+            return graph, intrinsic_system_ref, (global_t_scale, global_transforms.translation_transform)
         own_axes = tuple(intrinsic_system.axes())
         synthetic_external = CoordinateSystem.without_semantics(own_axes).as_ref(f"external-{name}")
         try:
@@ -552,7 +542,7 @@ def multiscale_graph_from_legacy(
 
 def scale_meta_from_dataset_transforms(
     axis_keys: Sequence[AxisKey],
-    global_scale_meta: Optional[Tuple[float, MultiscaleTransforms]],
+    global_scale_meta: Optional[Tuple[float, Optional[TranslationTransform]]],
     relative_scale_pixel_size: PixelSize,
     transformations: Optional[OME_ZARR_TRANSFORMS],
 ) -> Tuple[PixelSize, Optional[Translation], Optional[Tuple[AxisKey, ...]]]:
@@ -613,15 +603,15 @@ def scale_meta_from_dataset_transforms(
         # Special case for the "t pixel size stored in global transforms" convention.
         # global_t_scale is the pixel size along t in this case.
         # global_tfs_to_compose has an identity scale and maybe some translation in this case.
-        global_t_scale, global_tfs_to_compose = global_scale_meta
+        global_t_scale, global_translation_transform = global_scale_meta
         assert "t" in axis_keys, "dev error: multiscale_graph_from_legacy misidentified global_t_scale convention"
         pixel_size_values[list(axis_keys).index("t")] = global_t_scale
         if scale_translation is not None:
             scale_translation *= Factor(t=global_t_scale)
-        if global_tfs_to_compose.translation_transform is not None:
+        if global_translation_transform is not None:
             if scale_translation is None:
                 scale_translation = Translation.identity(axis_keys)
-            scale_translation += global_tfs_to_compose.translation_transform.to_translation(axis_keys)
+            scale_translation += global_translation_transform.to_translation(axis_keys)
 
     scale_pixel_size = scale_to_pixel_size_with_normalized_zeros(pixel_size_values, axis_keys)
     zeros = tuple(axis for axis, value in zip(axis_keys, pixel_size_values) if value == 0)
