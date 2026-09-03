@@ -1175,7 +1175,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             i += 1
         return candidate
 
-    def _legacy_multiscale_transforms(self) -> Optional["ome_zarr.MultiscaleTransforms"]:
+    def _find_legacy_compatible_coordinate_system(self) -> Optional["ome_zarr.MultiscaleTransforms"]:
         """
         Inspect graph to find MultiscaleTransforms for multiscale_dict["coordinateTransformations"].
         Preferably bound directly on this Multiscale's own intrinsic system (exact, lossless).
@@ -1200,7 +1200,30 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
                 or (isinstance(t.transforms[0], ome_zarr.InvertedMultiscaleTransforms))
             ):
                 return True
-            return False
+            scale_found = translation_found = False
+            for i, nested in enumerate(t.transforms):
+                compatible_types = (
+                    IdentityTransform,
+                    ProjectAxisTransform,
+                    MapAxisTransform,
+                    ScaleTransform,
+                    TranslationTransform,
+                )
+                if not isinstance(nested, compatible_types):
+                    return False  # sequence with something we can't handle
+                if isinstance(nested, ScaleTransform):
+                    # scale at start or at end-1 (or end if translation missing)
+                    if scale_found or i not in (0, len(t.transforms), len(t.transforms) - 1):
+                        # sequence with multiple scales or scale in middle -- would need to track axes
+                        return False
+                    scale_found = True
+                if isinstance(nested, TranslationTransform):
+                    # translation at 1, 0 if scale missing, or at end (inverted or just axesTo-then-translate)
+                    if translation_found or i not in (0, 1, len(t.transforms)):
+                        # see above
+                        return False
+                    translation_found = True
+            return scale_found or translation_found
 
         candidates = [t for t in self._transform_graph.transforms if _is_raw_or_transferred_legacy(t)]
 
@@ -1217,17 +1240,75 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             if isinstance(t.transforms[-1], ome_zarr.MultiscaleTransforms) and self._is_pure_axis_reshape(
                 t.transforms[:-1]
             ):
-                return self._reshaped_multiscale_transforms(t[1], target_axes=tuple(self.axes()))
-            elif self._is_pure_axis_reshape(t.transforms[1:]):
-                assert isinstance(
-                    t[0], ome_zarr.InvertedMultiscaleTransforms
-                ), "expected as_derived_from to create this"
-                return self._reshaped_multiscale_transforms(t[0].inverted(), target_axes=tuple(self.axes()))
+                ms_t = t.transforms[-1]
+                assert isinstance(ms_t, ome_zarr.MultiscaleTransforms) and isinstance(ms_t.source, NodeRef)
+                return self._reshaped_multiscale_transforms(
+                    ms_t, source_axes=tuple(ms_t.source.owner.axes()), target_axes=tuple(self.axes())
+                )
+            elif isinstance(t.transforms[0], ome_zarr.InvertedMultiscaleTransforms) and self._is_pure_axis_reshape(
+                t.transforms[1:]
+            ):
+                ms_t = t.transforms[0].inverted()
+                assert isinstance(ms_t, ome_zarr.MultiscaleTransforms) and isinstance(ms_t.source, NodeRef)
+                return self._reshaped_multiscale_transforms(
+                    ms_t, source_axes=tuple(ms_t.source.owner.axes()), target_axes=tuple(self.axes())
+                )
         for t in candidates:
             try:
                 return ome_zarr.MultiscaleTransforms.from_transforms((t,))
             except ValueError:
                 continue
+        for t in candidates:
+            # (scale) (+ translation) (+ structural) or (structural) (+ scale) (+ translation)
+            if not isinstance(t, TransformSequence):
+                continue
+            children = list(t.transforms)
+            scale = translation = None
+            scale_i = translation_i = None
+            for i, c in enumerate(children):
+                if isinstance(c, ScaleTransform):
+                    scale_i = i
+                    scale = children.pop(i)
+                if isinstance(c, TranslationTransform):
+                    translation_i = i
+                    translation = children.pop(i)
+            if not self._is_pure_axis_reshape(tuple(children)):
+                continue  # Should already be ensured anyway
+            if t.source == self._intrinsic_ref:
+                if translation_i is not None and scale_i is not None and scale_i > translation_i:
+                    # self --translation--scale--> external
+                    # The inverse of this sequence would be a sequence that *undoes* the original.
+                    # Here we would instead need the same translation expressed in `external`'s scale:
+                    # self --scale--(translation*scale)--> external
+                    # Flipped, not inverse. Rather weird thing to do. There are reasons OME-Zarr is always (scale[, translation]).
+                    continue
+                is_physical_then_structural = translation_i == 0 if scale is None else scale_i == 0
+                assert isinstance(t.target, NodeRef), "all transforms in graph must be bound and resolved"
+                ms_t_source_axes = tuple(self.axes()) if is_physical_then_structural else tuple(t.target.owner.axes())
+                identity_scale = ScaleTransform((1.0,) * len(ms_t_source_axes))
+                scale = scale if scale is not None else identity_scale
+                ms_children = (scale,) if translation is None else (scale, translation)
+                ms_t = ome_zarr.MultiscaleTransforms(ms_children)
+                return self._reshaped_multiscale_transforms(
+                    ms_t, source_axes=ms_t_source_axes, target_axes=tuple(self.axes())
+                )
+            assert t.target == self._intrinsic_ref, "intrinsic must be either source or target"
+            # Inverted: external --t--> self; presumably stored this way because the sequence is non-invertible.
+            # Legacy transforms express self --global_transforms--> external, so the physical component of t must be inverted
+            if translation_i is not None and scale_i is not None and scale_i < translation_i:
+                # external --translation--scale--> self ; see above
+                continue
+            last = len(t.transforms)
+            is_physical_then_structural = translation_i == last if scale is None else scale_i == last
+            assert isinstance(t.source, NodeRef), "all transforms in graph must be bound and resolved"
+            ms_t_source_axes = tuple(t.source.owner.axes()) if is_physical_then_structural else tuple(self.axes())
+            identity_scale = ScaleTransform((1.0,) * len(ms_t_source_axes))
+            scale = scale if scale is not None else identity_scale
+            ms_children = (scale,) if translation is None else (translation, scale)
+            ms_t = ome_zarr.InvertedMultiscaleTransforms(ms_children).inverted()
+            return self._reshaped_multiscale_transforms(
+                ms_t, source_axes=ms_t_source_axes, target_axes=tuple(self.axes())
+            )
         return None
 
     @staticmethod
@@ -1246,10 +1327,8 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
 
     @staticmethod
     def _reshaped_multiscale_transforms(
-        t: ome_zarr.MultiscaleTransforms, *, target_axes: Tuple[AxisKey, ...]
+        t: ome_zarr.MultiscaleTransforms, *, source_axes: Tuple[AxisKey, ...], target_axes: Tuple[AxisKey, ...]
     ) -> "ome_zarr.MultiscaleTransforms":
-        assert isinstance(t.source, NodeRef), "All MultiscaleTransforms must have a Multiscale source"
-        source_axes = tuple(t.source.owner.axes())
         scale = ome_zarr.scale_to_pixel_size_with_normalized_zeros(t.scale_transform.scale, source_axes).with_axes(
             target_axes
         )

@@ -1,6 +1,7 @@
 import pytest
 from clearscale._axis_values import PixelSize, Shape, Factor, Translation
 from clearscale._multiscale import Multiscale, Scale
+from clearscale._spatial_relations import AxisRearrangementTo
 
 
 def _multiscale(axes, size=4, pixel_size=None):
@@ -66,6 +67,8 @@ def test_multiscale_to_ome_zarr_falls_back_on_nonuniform_t_scale():
         (Translation(y=3, x=4), ([1.0, 1.0], [-3.0, -4.0])),
         ([Factor(y=2, x=2), Translation(y=3, x=4)], ([0.5, 0.5], [-3.0, -4.0])),
         ([Translation(y=3, x=4), Factor(y=2, x=2)], ([2.0, 2.0], [3.0, 4.0])),
+        ([AxisRearrangementTo("zyx"), Translation(z=0, y=3, x=4)], ([1.0, 1.0], [-3.0, -4.0])),
+        ([Translation(y=3, x=4), AxisRearrangementTo("x")], ([1.0, 1.0], [-3.0, -4.0])),
     ],
 )
 def test_multiscale_to_ome_zarr_serializes_compatible_coordinate_system_as_legacy_transforms(
@@ -74,6 +77,19 @@ def test_multiscale_to_ome_zarr_serializes_compatible_coordinate_system_as_legac
     ms = _multiscale("yx").with_coordinate_system("world", reached_by=relation)
 
     result = ms.to_ome_zarr(version="0.4")
+
+    assert "coordinateTransformations" in result
+    assert _global_scale_and_translation(result) == expected_global_scale_and_translation
+
+
+def test_multiscale_to_ome_zarr_serializes_coordinate_system_connected_by_reverse_drop():
+    source = _multiscale("zyx")
+    # The source--drop-->derived connection can only be stored in reverse
+    # (normally external systems on `derived` are connected as `derived --t--> system`)
+    derived_ms = _multiscale("yx").as_derived_from(source, by=[AxisRearrangementTo("yx"), Translation(y=3, x=4)])
+    expected_global_scale_and_translation = ([1.0, 1.0], [3.0, 4.0])
+
+    result = derived_ms.to_ome_zarr(version="0.4")
 
     assert "coordinateTransformations" in result
     assert _global_scale_and_translation(result) == expected_global_scale_and_translation
