@@ -376,23 +376,19 @@ def test_multiscale_as_derived_from_transfers_t_scale_convention_even_when_graph
     assert result._legacy_convention_global_t_scale == 0.5
 
 
-def test_multiscale_as_derived_from_does_not_port_t_scale_when_mismatching():
+def test_multiscale_as_derived_from_ports_t_scale_convention_when_mismatching():
     """
-    Calling as_derived_from() claims caller and donor share a space, but caller's
-    pixel_size["t"] != donor's global t-scale. This is deliberately not an error and does not
-    get auto-corrected via an inferred Factor: fabricating a t-scale relationship from two
-    numbers that happen to both be named "t" would assert a registration fact nothing here
-    can actually verify. If the two really are related by a scale factor, the caller should
-    say so explicitly via `by=Factor(t=...)`. Absent that, the convention just doesn't
-    transfer, same as other cases where the donor's metadata doesn't apply
-    (like path-bound transforms in the donor graph).
+    Calling as_derived_from() claims caller and donor share a space, so caller's
+    pixel_size["t"] != donor's global t-scale could be a red flag indicating this is wrong.
+    The user might have some reason why they didn't supply a Factor(t=0.9/0.5) as the relation though.
+    More important to carry forward the convention; but with the correct value in the derived multiscale.
     """
     caller_ms = Multiscale({"s0": Scale(shape=Shape(t=4, y=4, x=4), pixel_size=PixelSize(t=0.9, y=1.0, x=1.0))})
     donor_ms = Multiscale({"s0": Scale(shape=Shape(t=4, y=4, x=4))}, _legacy_convention_global_t_scale=0.5)
 
     result = caller_ms.as_derived_from(donor_ms)
 
-    assert result._legacy_convention_global_t_scale is None
+    assert result._legacy_convention_global_t_scale == 0.9
 
 
 def test_multiscale_as_derived_from_with_system_transferred_by_identity_does_not_retain_other():

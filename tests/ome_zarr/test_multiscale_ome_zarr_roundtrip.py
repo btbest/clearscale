@@ -2,7 +2,7 @@ import copy
 from typing import Any
 
 import pytest
-from clearscale import Multiscale
+from clearscale import Multiscale, Translation
 from clearscale.ome_zarr import make_all_singleton_shapes, SUPPORTED_OME_ZARR_VERSIONS_WRITE
 
 from tests.ome_zarr.multiscale_examples import (
@@ -155,3 +155,77 @@ def test_new_multiscale_writes_normalized_zero_scale_values():
     output_json = normalized.to_ome_zarr(version="0.5")
 
     assert output_json["datasets"][0]["coordinateTransformations"] == [{"type": "scale", "scale": [1.0, 1.0, 1.0]}]
+
+
+def test_multiscale_roundtrip_folds_global_translation_into_scales_if_global_t_convention():
+    """
+    The convention implies that the multiscale's intrinsic system is the *output* of the global transforms:
+    The axes would specify "time unit=seconds", but the dataset scales would have `1.0` t-scale. Only the
+    global scale has the correct `12.0` t-scale. So "the coordinate system in which the scale meta is correct" is
+    the system after applying *both* the dataset transforms and the global transforms.
+    The only consistent interpretation of a global translation then is that it is part of the scale translation.
+    This is an edge case: There are no known public cases that use both the "global t-scale" convention, and also
+    put a global translation behind that global scale.
+
+    We could identify the common portion of all scales' translation and extract
+    that to put it on the global level. But: The normal case for scale translation is that the first downscale has
+    `half pixel size along scaled axes`, and the subsequent ones have more. This means that if the raw data scale is missing,
+    we would make it normal behaviour to extract a global translation next to the global t-scale. We would be
+    practically guaranteed to create non-conventional metadata when deriving from a Multiscale that follows the convention,
+    when omitting the raw scale.
+
+    It's more likely to occur that someone is working with nifti-zarr (which uses this convention) and then might only
+    continue working with downsampled data, needing to maintain nifti-zarr.
+
+    Hence, accept the non-round-trip. If we see "global t-scale" convention, plus a global translation, compose it into
+    every scale. But do not decompose it back out on write, to ensure written outputs follow the convention.
+    """
+    metadata = {
+        "axes": [
+            {"name": "t", "type": "time", "unit": "seconds"},
+            {"name": "y", "type": "space", "unit": "nanometers"},
+            {"name": "x", "type": "space", "unit": "nanometers"},
+        ],
+        "datasets": [
+            # Raw scale missing (it would have zeros in its translation)
+            {
+                "path": "s1",
+                "coordinateTransformations": [
+                    {"type": "scale", "scale": [1.0, 40.0, 40.0]},
+                    {"type": "translation", "translation": [0.0, 10.0, 10.0]},
+                ],
+            },
+            {
+                "path": "s2",
+                "coordinateTransformations": [
+                    {"type": "scale", "scale": [1.0, 80.0, 80.0]},
+                    {"type": "translation", "translation": [0.0, 30.0, 30.0]},
+                ],
+            },
+        ],
+        "coordinateTransformations": [
+            {"type": "scale", "scale": [3.4, 1.0, 1.0]},
+            {
+                "type": "translation",
+                "translation": [1.0, 2.0, 3.0],
+            },  # Unconventional - global translation meaning is undefined
+        ],
+    }
+
+    parsed = Multiscale.from_ome_zarr(metadata, shape_source={"s1": (5, 100, 200), "s2": (5, 50, 100)})
+
+    assert parsed["s1"].translation == Translation(t=1.0, y=12.0, x=13.0)  # dataset + global sum
+
+    output_json = parsed.to_ome_zarr(version="0.4")
+
+    assert output_json["coordinateTransformations"][0]["scale"] == [3.4, 1.0, 1.0]
+    assert len(output_json["coordinateTransformations"]) == 1, "global translation not expected to roundtrip"
+    assert output_json["datasets"][0]["coordinateTransformations"][0]["scale"] == [1.0, 40.0, 40.0]
+    # The global t-translation needs to be divided by the global t-scale when folding it into dataset translation.
+    # `dataset_scale * dataset_translation * global_scale + global_translation` must be eq before and after write.
+    # In the input, that formula is:
+    # 1.0 * 0.0 * 3.4 + 1.0 = 1.0
+    # In the output, it becomes:
+    # 1.0 / 3.4 * 1.0 * 3.4 + 0.0 = 1.0
+    expected_s1_translation = [1.0 / 3.4, 12.0, 13.0]
+    assert output_json["datasets"][0]["coordinateTransformations"][1]["translation"] == expected_s1_translation

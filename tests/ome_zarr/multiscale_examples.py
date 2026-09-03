@@ -147,7 +147,6 @@ OME_ZARR_MAX_MS_0_4 = {
     ],
     "coordinateTransformations": [
         {"type": "scale", "scale": [120.0, 1.0, 1.0, 1.0, 1.0]},
-        {"type": "translation", "translation": [0.0, 0.0, 0.0, 1.4, 1.4]},
     ],
     "type": "gaussian",
     "metadata": SCALING_METHOD_EXAMPLE,
@@ -238,7 +237,6 @@ OME_ZARR_MAX_MS_0_4_GLOBAL_T_IS_PIXEL_SIZE_CONVENTION = {
     ],
     "coordinateTransformations": [
         {"scale": [12.0, 1.0, 1.0], "type": "scale"},
-        {"translation": [0.0, 0.0, 3.4], "type": "translation"},
     ],
 }
 OME_ZARR_MAX_MS_0_5 = {key: value for key, value in OME_ZARR_MAX_MS_0_4.items() if key != "version"}

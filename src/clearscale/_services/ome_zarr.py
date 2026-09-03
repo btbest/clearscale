@@ -7,7 +7,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Union, Dict, Literal, List, Any, Optional, Tuple, Protocol, Iterable, TYPE_CHECKING
 
-from clearscale._axis_values import ShapeLike, Translation, PixelSize, AxisKey
+from clearscale._axis_values import ShapeLike, Translation, PixelSize, AxisKey, Factor
 from clearscale._transforms import (
     TransformSequence,
     IdentityTransform,
@@ -312,13 +312,16 @@ class MultiscaleTransforms(TransformSequence):
         if not self._endpoints_can_chain_after(earlier):
             return None
         scale_product = self.scale_transform.composed_with(earlier.scale_transform)
-        assert isinstance(scale_product, ScaleTransform), "scales can always compose"
+        if isinstance(scale_product, IdentityTransform):
+            scale_product = ScaleTransform(scale=tuple(1.0 for _ in self.scale_transform.scale))
+        else:
+            assert isinstance(scale_product, ScaleTransform), "scales can always compose"
         if earlier.translation_transform is not None and self.translation_transform is not None:
             translation_sum = self.translation_transform.composed_with(earlier.translation_transform)
             if isinstance(translation_sum, IdentityTransform):
                 transforms: Tuple[Transform, ...] = (
                     scale_product,
-                    TranslationTransform(translation=(0.0 for _ in self.translation_transform.translation)),
+                    TranslationTransform(translation=tuple(0.0 for _ in self.translation_transform.translation)),
                 )
             else:
                 assert isinstance(translation_sum, TranslationTransform), "translations can always compose"
@@ -460,8 +463,8 @@ def global_t_scale_if_matches_legacy_convention(
     This manifests as [z1, y1, x1] in dataset-scale and [z2, y2, x2] in multiscale-scale.
 
     -- So what do we make of it?
-    Special-case t. If dataset-scale for t is 1, and multiscale-scale is non-1 *only* for t, go into legacy convention mode.
-    Don't special-case c because anything but 1.0 is nonsense anyway.
+    Look strictly for the pattern "scale[t] is 1.0 in all datasets, and not 1.0 on global level".
+    If this matches, interpret the *output* of the global transforms as the multiscale's intrinsic system.
 
     Return None if the metadata does not conform to the global-t-scale convention, otherwise the scale.
     """
@@ -472,15 +475,18 @@ def global_t_scale_if_matches_legacy_convention(
     global_scale = global_transforms.scale_transform.scale
     global_scale_non_t = global_scale[:t_index] + global_scale[t_index + 1 :]
     if global_scale[t_index] in identity_values:
+        # Violates convention rule 1: global/multiscale-scale[t] must be non-identity.
+        # This means the convention can't express if t is exactly 1.0 units per pixel.
+        # Doesn't matter: if that's the case, the metadata look the same with and without the convention anyway.
         return None
     if any(v not in identity_values for v in global_scale_non_t):
-        # Violates convention rule 1: global/multiscale-scale must be *only* t, otherwise identity
+        # Violates convention rule 2: global/multiscale-scale must be *only* t, otherwise identity
         return None
     for ds in multiscale["datasets"]:
         try:
             pixel_size_values = ds["coordinateTransformations"][0]["scale"]
             if pixel_size_values[t_index] not in identity_values:
-                # Violates convention rule 2: all dataset-scale must be identity for t
+                # Violates convention rule 3: all dataset-scale must be identity for t
                 return None
         except (KeyError, TypeError, ValueError):
             return None
@@ -489,7 +495,15 @@ def global_t_scale_if_matches_legacy_convention(
 
 def multiscale_graph_from_legacy(
     multiscale: OME_ZARR_MULTISCALE, *, name: str
-) -> Tuple[TransformGraph, NodeRef[CoordinateSystem], Optional[float]]:
+) -> Tuple[TransformGraph, NodeRef[CoordinateSystem], Optional[Tuple[float, MultiscaleTransforms]]]:
+    """
+    Convert legacy metadata into modern coordinate graph interpretation.
+    Returns graph, intrinsic ref, and None or a tuple of (pixel_size[t], global_transforms_to_fold).
+
+    The third return tuple are the contents of multiscale[coordinateTransformations] if the entire multiscale
+    conformed to a legacy convention where t-scale is written on multiscale level, which implies that the intrinsic
+    coordinate system is the output of the global transforms rather than its input as the spec requires.
+    """
     multiscale_tf_list = multiscale.get("coordinateTransformations")
     try:
         global_transforms = MultiscaleTransforms.from_list(multiscale_tf_list)
@@ -501,24 +515,15 @@ def multiscale_graph_from_legacy(
     intrinsic_system = CoordinateSystem.from_ome_zarr(multiscale)
     intrinsic_system_ref = intrinsic_system.as_ref(name)
     graph = TransformGraph.single_isolated_system(intrinsic_system_ref)
-    global_t_scale: Optional[float] = None
     if global_transforms is not None:
         global_t_scale = global_t_scale_if_matches_legacy_convention(
             multiscale, global_transforms, tuple(intrinsic_system.axes())
         )
-        if (
-            global_t_scale
-            and 0 not in global_transforms.scale_transform.scale
-            and global_transforms.translation_transform is None
-        ):
-            # Contained no information besides global_t_scale - leave it out of the graph
-            return graph, intrinsic_system_ref, global_t_scale
-        elif global_t_scale:
-            # There is no conventional meaning of the global translation. Presumably it represents a shift relative
-            # to some external reference, so keep it in the graph as a genuine transform to another coordinate system.
-            # Replace t scale with identity in this case: The "global t-scale" convention means it's part of pixel size,
-            # not some scaling relative to an external reference. This way graph + scale metadata remain
-            # internally consistent (otherwise scale.pixel_size would duplicate the t-scale)
+        if global_t_scale:
+            # Using the global transforms for pixel_size[t] as the convention does,
+            # implies that the output of the global transforms *is* the intrinsic system
+            # -> compose into dataset transforms (Scale props)
+            # -> exclude from graph (the global transforms do not refer to some external coordinate system in this case)
             assert (
                 sum(v == global_t_scale for v in global_transforms.scale_transform.scale) == 1
             ), f"dev error: {global_transforms.scale_transform.scale} doesn't actually use global-t convention"
@@ -532,7 +537,7 @@ def multiscale_graph_from_legacy(
                 if global_transforms.translation_transform is None
                 else (scale_with_t_identity, global_transforms.translation_transform)
             )
-            global_transforms = MultiscaleTransforms(tfs)
+            return graph, intrinsic_system_ref, (global_t_scale, MultiscaleTransforms(tfs))
         own_axes = tuple(intrinsic_system.axes())
         synthetic_external = CoordinateSystem.without_semantics(own_axes).as_ref(f"external-{name}")
         try:
@@ -542,26 +547,25 @@ def multiscale_graph_from_legacy(
         except ValueError:
             # E.g. mismatching number of axes between transforms and coordinate system
             warnings.warn(f"Invalid OME-Zarr metadata: Ignoring multiscale transforms: {multiscale_tf_list!r}.")
-    return graph, intrinsic_system_ref, global_t_scale
+    return graph, intrinsic_system_ref, None
 
 
 def scale_meta_from_dataset_transforms(
     axis_keys: Sequence[AxisKey],
-    global_t_scale: Optional[float],
+    global_scale_meta: Optional[Tuple[float, MultiscaleTransforms]],
     relative_scale_pixel_size: PixelSize,
     transformations: Optional[OME_ZARR_TRANSFORMS],
-) -> Tuple[PixelSize, Optional[Translation], Optional[Tuple[AxisKey, ...]], bool]:
+) -> Tuple[PixelSize, Optional[Translation], Optional[Tuple[AxisKey, ...]]]:
     """
     Extract pixel size and translation according to this dataset's `coordinateTransformations`.
     Returns the scale's:
         - pixel size (defaulting to 1.0 or relative factor if invalid meta)
         - translation (defaulting to None if invalid meta)
         - a tuple of axis keys where the `scale` transform was 0.0 (normally None, purely for metadata round-trip)
-        - merged_t_scale: bool -- whether the global_transform's t-scale was assumed to mean pixel size along t
     """
     if transformations is None:
         # Fine: OME-Zarr up to v0.3 didn't have coordinateTransformations
-        return relative_scale_pixel_size, None, None, False
+        return relative_scale_pixel_size, None, None
 
     try:
         dataset_transforms = MultiscaleTransforms.from_list(transformations)
@@ -571,7 +575,7 @@ def scale_meta_from_dataset_transforms(
             "Continuing with relative scale factor as pixel size. Received: "
             f"{transformations!r}"
         )
-        return relative_scale_pixel_size, None, None, False
+        return relative_scale_pixel_size, None, None
 
     if dataset_transforms is None:
         # Meta existed and was valid but e.g. empty
@@ -580,7 +584,7 @@ def scale_meta_from_dataset_transforms(
             "Continuing with relative scale factor as pixel size. Received: "
             f"{transformations!r}"
         )
-        return relative_scale_pixel_size, None, None, False
+        return relative_scale_pixel_size, None, None
 
     if len(axis_keys) != len(dataset_transforms.scale_transform.scale):
         warnings.warn(
@@ -589,7 +593,7 @@ def scale_meta_from_dataset_transforms(
             "Continuing with relative scale factor as pixel size. Received: "
             f"{dataset_transforms.scale_transform.scale!r}"
         )
-        return relative_scale_pixel_size, None, None, False
+        return relative_scale_pixel_size, None, None
 
     if any(v < 0.0 for v in dataset_transforms.scale_transform.scale):
         warnings.warn(
@@ -597,24 +601,31 @@ def scale_meta_from_dataset_transforms(
             "Continuing with relative scale factor as pixel size. Received: "
             f"{dataset_transforms.scale_transform.scale!r}"
         )
-        return relative_scale_pixel_size, None, None, False
+        return relative_scale_pixel_size, None, None
 
-    dataset_t_scale_replaced_with_global = False
     pixel_size_values = list(dataset_transforms.scale_transform.scale)
-    if global_t_scale is not None:
-        # Special case for the "t pixel size stored in global transforms" convention.
-        # global_t_scale is the pixel size along t in this case.
-        assert "t" in axis_keys, "dev error: multiscale_graph_from_legacy misidentified global_t_scale convention"
-        pixel_size_values[list(axis_keys).index("t")] = global_t_scale
-
-    scale_pixel_size = scale_to_pixel_size_with_normalized_zeros(pixel_size_values, axis_keys)
     scale_translation = (
         dataset_transforms.translation_transform.to_translation(axis_keys)
         if dataset_transforms.translation_transform
         else None
     )
-    zeros = tuple(axis for axis, value in zip(axis_keys, dataset_transforms.scale_transform.scale) if value == 0)
-    return scale_pixel_size, scale_translation, zeros, dataset_t_scale_replaced_with_global
+    if global_scale_meta is not None:
+        # Special case for the "t pixel size stored in global transforms" convention.
+        # global_t_scale is the pixel size along t in this case.
+        # global_tfs_to_compose has an identity scale and maybe some translation in this case.
+        global_t_scale, global_tfs_to_compose = global_scale_meta
+        assert "t" in axis_keys, "dev error: multiscale_graph_from_legacy misidentified global_t_scale convention"
+        pixel_size_values[list(axis_keys).index("t")] = global_t_scale
+        if scale_translation is not None:
+            scale_translation *= Factor(t=global_t_scale)
+        if global_tfs_to_compose.translation_transform is not None:
+            if scale_translation is None:
+                scale_translation = Translation.identity(axis_keys)
+            scale_translation += global_tfs_to_compose.translation_transform.to_translation(axis_keys)
+
+    scale_pixel_size = scale_to_pixel_size_with_normalized_zeros(pixel_size_values, axis_keys)
+    zeros = tuple(axis for axis, value in zip(axis_keys, pixel_size_values) if value == 0)
+    return scale_pixel_size, scale_translation, zeros
 
 
 def scale_to_pixel_size_with_normalized_zeros(scale: Sequence[float], axes: Sequence[AxisKey]) -> PixelSize:

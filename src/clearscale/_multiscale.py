@@ -774,14 +774,16 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
     ):
         ome_zarr.require_dataset_paths(multiscale_dict)
         get_shape = ome_zarr.normalize_shape_source_to_callable(shape_source, multiscale_dict)
+        global_meta = global_t_scale = None
         try:
             transform_graph, intrinsic_system_ref = ome_zarr.extract_multiscale_graph(multiscale_dict)
-            global_t_scale = None
         except ValueError:
             intrinsic_system_name = _random_multiscale_name()
-            transform_graph, intrinsic_system_ref, global_t_scale = ome_zarr.multiscale_graph_from_legacy(
+            transform_graph, intrinsic_system_ref, global_meta = ome_zarr.multiscale_graph_from_legacy(
                 multiscale_dict, name=intrinsic_system_name
             )
+            if global_meta is not None:
+                global_t_scale, _ = global_meta
         assert intrinsic_system_ref.owner, "dev error: must reference intrinsic system"
         axis_keys = list(intrinsic_system_ref.owner.axes())
         unit = intrinsic_system_ref.owner.get_unit()
@@ -797,10 +799,8 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             relative_scale_factor = base_shape.scaling_to(scale_shape)
             relative_scale_pixel_size = PixelSize.identity(axis_keys).scaled_by(relative_scale_factor)
             dataset_transforms = dataset.get("coordinateTransformations")
-            scale_pixel_size, scale_translation, zero_scale_axes, did_merge_t_scale = (
-                ome_zarr.scale_meta_from_dataset_transforms(
-                    axis_keys, global_t_scale, relative_scale_pixel_size, dataset_transforms
-                )
+            scale_pixel_size, scale_translation, zero_scale_axes = ome_zarr.scale_meta_from_dataset_transforms(
+                axis_keys, global_meta, relative_scale_pixel_size, dataset_transforms
             )
             if zero_scale_axes:
                 zero_scale_axes_by_key[scale_key] = zero_scale_axes
@@ -958,14 +958,13 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
                     f"from {source_axes!r}, but this Multiscale has {target_axes!r}. {by=!r}"
                 )
 
-        candidate_t_scale = self._legacy_convention_global_t_scale or (
-            "t" in self.axes() and other._legacy_convention_global_t_scale
-        )
-        transfers_cleanly = not candidate_t_scale or all(
-            scale.pixel_size["t"] == candidate_t_scale for scale in self.values()
-        )
-        transferred_global_t_scale = candidate_t_scale if transfers_cleanly else None
-        unchanged_t_scale = bool(transferred_global_t_scale) == bool(self._legacy_convention_global_t_scale)
+        transferred_global_t_scale = None
+        if other._legacy_convention_global_t_scale:
+            # Transfer the fact that we use the convention; but only if self can even be expressed using it
+            # (i.e. has t, and isn't scaled across t). The actual value stored must be self's own t-scale.
+            if "t" in self.axes() and not "t" in self.scaled_axes():
+                transferred_global_t_scale = self.first_value().pixel_size["t"]
+        unchanged_t_scale = transferred_global_t_scale == self._legacy_convention_global_t_scale
 
         existing_refs = list(self._transform_graph.all_system_refs)
         other_unique = self._find_or_make_unique_ref(
@@ -1081,20 +1080,19 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         )
         result["axes"] = intrinsic_system_dict["axes"]
 
-        multiscale_transforms = self._legacy_multiscale_transforms()
-        all_scale_t_matching = "t" in self.axes() and all(
-            scale.pixel_size["t"] == self._legacy_convention_global_t_scale for scale in self.values()
-        )
-        if not self._legacy_convention_global_t_scale or not all_scale_t_matching:
+        multiscale_transforms = self._find_legacy_compatible_coordinate_system()
+        do_apply_global_t = False
+        if self._legacy_convention_global_t_scale:
+            can_apply_global_t_convention = "t" in self.axes() and "t" not in self.scaled_axes()
+            # Decision: Convention overrides external system in the legacy case.
+            # See `test_multiscale_to_ome_zarr_t_scale_convention_overrides_compatible_coordinate_system`
+            if can_apply_global_t_convention:
+                do_apply_global_t = True
+                multiscale_transforms = None
+
+        if not do_apply_global_t:
             # "Normal" case, no special treatment.
-            if self._legacy_convention_global_t_scale:
-                pixel_sizes = {scale_key: scale.pixel_size["t"] for scale_key, scale in self.items()}
-                warnings.warn(
-                    f"Dev error? Multiscale claims to use legacy t convention but has non-uniform pixel_size[t]: {pixel_sizes}"
-                )
             if multiscale_transforms:
-                # Unconventional use of multiscale-transforms for some transform to an undefined external reference.
-                # Write as read.
                 result["coordinateTransformations"] = multiscale_transforms.to_legacy_ome_zarr()
             for key, scale in self.items():
                 dataset = ome_zarr.build_dataset_dict(
@@ -1109,35 +1107,28 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
 
         # Legacy convention where pixel size along t is written as a global scale transform
         axes = list(self.axes())
-        global_t_scale = self._legacy_convention_global_t_scale
-        assert global_t_scale and "t" in axes, "global t-scale must not be set when inapplicable"
-        if multiscale_transforms is None:
-            global_pixel_size = PixelSize(t=global_t_scale).with_axes(axes)
-            global_scale = ScaleTransform.from_pixel_size(global_pixel_size)
-            multiscale_transforms = ome_zarr.MultiscaleTransforms((global_scale,))
-        else:
-            global_scale_values = list(multiscale_transforms.scale_transform.scale)
-            assert all(v in (PixelSize._default(), 0) for v in global_scale_values), "doesn't conform to convention"
-            global_scale_values[axes.index("t")] = global_t_scale
-            global_scale = ScaleTransform(scale=tuple(global_scale_values))
-            tfs = (
-                (global_scale,)
-                if multiscale_transforms.translation_transform is None
-                else (global_scale, multiscale_transforms.translation_transform)
-            )
-            multiscale_transforms = ome_zarr.MultiscaleTransforms(tfs)
+        assert do_apply_global_t, "implied by branch above"
+        pixel_size_t_values = set(scale.pixel_size["t"] for scale in self.values())
+        assert len(pixel_size_t_values) == 1, "non-scaling across t implied by do_apply_global_t condition"
+        global_t_scale = next(iter(pixel_size_t_values))
+        global_pixel_size = PixelSize(t=global_t_scale).with_axes(axes)
+        global_scale_transform = ScaleTransform.from_pixel_size(global_pixel_size)
+        multiscale_transforms = ome_zarr.MultiscaleTransforms((global_scale_transform,))
         result["coordinateTransformations"] = multiscale_transforms.to_legacy_ome_zarr()
         for key, scale in self.items():
             dataset_scale = scale.pixel_size
+            dataset_translation = scale.translation
             if global_t_scale:
-                assert dataset_scale["t"] == global_t_scale, "doesn't conform to convention"
+                assert dataset_scale["t"] == global_t_scale, "doesn't conform, should've been in the earlier branch"
                 # scale.pixel_size["t"] is written in global transforms in this case
                 dataset_scale = scale.pixel_size.with_identity("t")
+                # and the t-translation must be un-scaled by the factor we've just divided out
+                dataset_translation = scale.translation * Factor(t=global_t_scale).inverted()
             dataset = ome_zarr.build_dataset_dict(
                 version,
                 key,
                 dataset_scale,
-                scale.translation,
+                dataset_translation,
                 serialized_zero_scale_axes=self._zero_scale_axes_by_key.get(key, ()),
             )
             result["datasets"].append(dataset)

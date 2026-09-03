@@ -88,6 +88,14 @@ def test_translation_adds_and_subtracts_translation_axis_wise():
     assert_axis_values(left - right, Translation, [("y", -1.0), ("x", 2.0)])
 
 
+def test_translation_mul_factor_rejects_extra_factor_axes():
+    translation = Translation([("y", 2.0), ("x", 4.0)])
+    factor = Factor([("y", 2.0), ("x", 2.0), ("z", 2.0)])
+
+    with pytest.raises(ValueError, match="Attempted to scale axes with no base translation"):
+        _ = factor * translation
+
+
 def test_pixel_offset_adds_and_subtracts_pixel_offset_axis_wise():
     left = PixelOffset([("y", 10), ("x", 3)])
     right = PixelOffset([("y", 4), ("x", 8)])
@@ -211,6 +219,7 @@ def test_implemented_dunders_return_not_implemented_for_unsupported_operands():
     assert PixelSize(y=1.0).__truediv__(Shape(y=2)) is NotImplemented
     assert Translation(y=1.0).__add__(PixelOffset(y=1)) is NotImplemented
     assert Translation(y=1.0).__sub__(PixelOffset(y=1)) is NotImplemented
+    assert Translation(y=1.0).__mul__(PixelSize(y=1)) is NotImplemented
     assert PixelOffset(y=1).__add__(Shape(y=1)) is NotImplemented
     assert PixelOffset(y=1).__sub__(Shape(y=1)) is NotImplemented
     assert PixelOffset(y=1).__mul__(Factor(y=1.0)) is NotImplemented
@@ -232,7 +241,6 @@ def test_implemented_dunders_return_not_implemented_for_unsupported_operands():
         lambda: PixelSize(y=1.0) - PixelSize(y=1.0),  # type: ignore[operator]
         lambda: Shape(y=1) + Shape(y=1),  # type: ignore[operator]
         lambda: Shape(y=1) - Shape(y=1),  # type: ignore[operator]
-        lambda: Translation(y=1.0) * Factor(y=1.0),  # type: ignore[operator]
         lambda: PixelOffset(y=1) / Factor(y=1.0),  # type: ignore[operator]
     ],
 )

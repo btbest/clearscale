@@ -336,11 +336,13 @@ class Factor(_AxisFloats, SpatialRelation):
         Note: Factors act as divisors for shape (e.g. 1024 / 0.5 = 2048)."""
         return math.prod(self.values()) < 1
 
-    def __mul__(self, other: object) -> Union["Factor", "PixelSize", NotImplementedType]:
+    def __mul__(self, other: object) -> Union["Factor", "PixelSize", "Translation", NotImplementedType]:
         if isinstance(other, Factor):
             _require_identical_axes(self, other)
             return Factor((a, self[a] * other[a]) for a in self)
         if isinstance(other, PixelSize):
+            return other.scaled_by(self)
+        if isinstance(other, Translation):
             return other.scaled_by(self)
         return NotImplemented
 
@@ -529,6 +531,16 @@ class Translation(_AxisFloats, SpatialRelation):
         _require_identical_axes(self, other)
         return Translation((a, self[a] - other[a]) for a in self)
 
+    def __mul__(self, other: object) -> Union["Translation", NotImplementedType]:
+        if isinstance(other, Factor):
+            return self.scaled_by(other)
+        return NotImplemented
+
+    def __truediv__(self, other: object) -> Union["Translation", NotImplementedType]:
+        if isinstance(other, Factor):
+            return self.scaled_by(other.inverted())
+        return NotImplemented
+
     def with_identity(self, axes: Axes) -> "Translation":
         """Reset the values for `axes` to 0.0."""
         return super().with_default(axes)
@@ -541,6 +553,34 @@ class Translation(_AxisFloats, SpatialRelation):
         """Axis-wise translation * -1."""
         inverted_items = [(a, -self[a]) for a in self]
         return self.__class__(inverted_items)
+
+    def scaled_by(self, factor: Union[Factor, Mapping[AxisKey, float], Scalar]) -> "Translation":
+        """
+        Scale this Translation by factor to obtain a scaled Translation.
+        This is an axis-wise operation:
+        - Missing axes in `factor` default to 1.0 (no change)
+        - Passing a scalar (float/int) applies it uniformly to all axes
+        - Extra axes in `factor` are rejected
+        Note if passing scalar: factor 2.0 means double pixel size = half resolution.
+        """
+        # Identical to PixelSize.scaled_by. Maybe extract.
+        if isinstance(factor, Factor):
+            pass
+        elif isinstance(factor, numbers.Real):
+            factor = Factor.uniform(self, float(factor))
+        else:
+            factor = Factor(factor)
+        base_axes = set(self.keys())
+        factor_axes = set(factor.keys())
+        invalid_axes = factor_axes - base_axes
+        if invalid_axes:
+            raise ValueError(
+                f"Attempted to scale axes with no base translation: "
+                f"{sorted(invalid_axes, key=str)} not present in {sorted(base_axes, key=str)}"
+            )
+        reordered = factor.with_axes(self)
+        scaled_items = [(a, reordered[a] * self[a]) for a in self]
+        return Translation(scaled_items)
 
     def to_pixel_offset(
         self,
