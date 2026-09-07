@@ -4,15 +4,18 @@ In a nutshell, for simple cases:
 from clearscale import OmeZarrGroup
 
 # Read
+
 # zarr_group is whatever object your zarr library uses for group access.
 # e.g. zarr-python: zarr_group = zarr.open(path)
 #      z5py:        zarr_group = z5py.File(path)
 multiscale = OmeZarrGroup.from_group(zarr_group).multiscales[0]
 
 # Do stuff
+
 output_multiscale = make_multiscale_according_to_actual_data_processing()
 
 # Write
+
 output_group_meta = OmeZarrGroup.from_single(output_multiscale).to_attrs(version="0.5")
 output_zarr_group.attrs.update(output_group_meta)
 ```
@@ -61,7 +64,7 @@ python script.py --path https://someserver.org/public-data/00121
 ```
 
 Your zarr backend will tell you whether that path points to a zarr object at all.
-Assuming it does, the next thing you will want to know is, "Is this zarr object an *OME-Zarr* object?"
+Assuming it does, the next thing you will want to know is, "Is this *zarr* object an *OME-Zarr* object?"
 
 clearscale recognises all valid OME-Zarr objects of all OME-Zarr versions, up to and including 0.6.rc0.
 
@@ -82,7 +85,7 @@ You can either pass the group to `.from_group`, or the attrs to `.from_attrs`.
 
 `from_attrs` needs you to specify a `shape_source`, because it needs to obtain array shapes, and the only way to obtain array shapes is to read them from the group...
 So if you don't provide the group, there needs to be another way to obtain them.
-`"singletons"` is a magic word that will tell clearscale to skip obtaining shapes entirely and just put ones along all axes.
+`"singletons"` is a magic word that will tell clearscale to skip obtaining shapes entirely and just put `1` along all axes.
 
 You can now find out whether the metadata describes an OME-Zarr dataset, and if so, what kind, through its `.kind`:
 
@@ -120,8 +123,7 @@ if ome_meta.kind is GroupKind.MULTISCALE:
 This is probably the most common case.
 
 `ome_meta.multiscales[0]` is a `clearscale.Multiscale` instance.
-More details on working with Multiscales in [`basics.md`](basics.md).
-The important detail here is that it works like a dict:
+In clearscale, Multiscales work like a dict:
 
 ```python
 print(multiscale)
@@ -221,26 +223,108 @@ You need two things:
 
 clearscale supports writing OME-Zarr metadata in the stable OME-Zarr versions `0.4` and `0.5`, and the "in-development" version `0.6.rc0`.
 
-## Making new OmeZarrGroups
+## Making new Multiscales
+The two most important methods here are: `Multiscale.from_single` and `Multiscale.derive`.
 
-Let's assume you used the [`basics`](basics.md) to derive a new `Multiscale` that you want to save now:
+### Creating a Multiscale from scratch
+`from_single` is for creating a new Multiscale from scratch, from a single `Scale` object you manually create.
+
+The absolute minimum path when you really have no metadata at all:
 
 ```python
-from clearscale import Multiscale, OmeZarrGroup
+# If you don't even know axes, you can't use OME-Zarr
+scale = Scale(
+  shape=Shape.fromkeys("zyx")
+)
 
-new_multiscale: Multiscale = do_stuff()
+multiscale = Multiscale.from_single(
+  scale, 
+  scale_key="data_subpath"
+)
+```
+
+If more metadata is available (pixel size, units, etc.), pass it to the `Scale`.
+
+If you're scaling the data, make a matching blueprint and add the `blueprint=your_blueprint` parameter to expand the single Scale to multiple scales matching your blueprint.
+Don't forget the appropriate `translation_shift_func`.
+
+(Also cf. the other examples in [the top-level readme](../README.md))
+
+### Deriving a new Multiscale from an existing one
+`derive` is for creating new Multiscales from one of an existing Multiscale's entries.
+
+This is intended to match workflows that load a multiscale dataset and select one of its scale levels for further processing.
+
+`derive` easily creates a new single-scale-Multiscale that lets you carry over the metadata with no extra effort:
+
+```python
+assert "s3" in old_multiscale, "Deriving from an existing scale at 's3'"
+
+new_multiscale = old_multiscale.derive("s3")
+# Multiscale({"s3": Scale(...)})
+```
+
+If you also scale the processing output derived from that scale, provide the matching blueprint and the translation shift as for `from_single`.
+
+`derive` accepts an additional parameter `derived_by: Union[SpatialRelation, Sequence[SpatialRelation]]`.
+You can use it to specify *how* the new Multiscale was derived from the source Scale.
+Note that when it comes to writing output metadata, only OME-Zarr version 0.6 can fully express all `SpatialRelations`.
+When generating OME-Zarr versions 0.5 or 0.4, clearscale will express the relation in the output metadata only if possible (e.g. if it only consists of `Factor`, `Translation` and/or `AxisRearrangementTo`).
+
+## Making new OmeZarrGroups
+
+All OME-Zarr datasets are zarr *groups*.
+Your own code needs to create the output group, and write the array(s) to the correct paths inside it.
+clearscale helps you generate the zarr attrs for the group.
+
+Your processing should have created a new Multiscale as described in the previous section:
+
+```python
+from clearscale import Multiscale
+
+new_multiscale: Multiscale = see_section_above()
+```
+
+As on the reading side, the Multiscale's keys must match the paths within the output zarr group where the corresponding data of that scale level is written.
+In principle, the layout on disk needs to correspond to:
+
+```python
+new_zarr_group = zarr.open_group(output_path, "w")
+for scale_key in new_multiscale.keys():
+    new_zarr_group.create_array(
+      scale_key, 
+      data=get_data_for_scale(scale_key)
+    )
+```
+
+If you did not scale the data, you would of course only have one scale, and you would know its key (the array path within the group).
+If you did scale the data, it might be simpler to write the data according to the scaling blueprint you used as shown in the [`README`](../README.md) examples.
+
+Generating the new zarr attrs then simply becomes:
+
+```python
+from clearscale import OmeZarrGroup
 
 new_ome_meta = OmeZarrGroup.from_single(new_multiscale)
 
 new_attrs = new_ome_meta.to_attrs(version="0.5")
 
-# new_zarr_group is the group you wrote your scale arrays into
 new_zarr_group.attrs.update(new_attrs)
 ```
 
-That's all.
+Or more compact:
 
-Please make sure you actually write the individual scale data to `new_zarr_group[scale_key] for scale_key in new_multiscale` (or better, the blueprint you used to generate the multiscale) as shown in the [`README`](../README.md) examples.
+```python
+from clearscale import OmeZarrGroup
+
+new_zarr_group.attrs.update(
+    OmeZarrGroup
+    .from_single(new_multiscale)
+    .to_attrs(version="0.5")
+)
+```
+
+That's all.
 
 ## OME-Zarr version specifics
 
@@ -271,12 +355,12 @@ This covers multiple multiscales, HCS plates, labels, bioformats2raw, scenes.
 
 Special cases for further path discovery that you may want to handle for full support:
 
-* OME-Zarr multiscale groups *usually* define only a single multiscale (in which case they would be `GroupKind.MULTISCALE`), but they can define multiple (in which case they are `GroupKind.COLLECTION`). In this case, you could obtain the first scale path (key) from each Multiscale, append the scale path to the base path, and display them to choose from.
-* In the `GroupKind.BF2RAW` case, there may or may not be a subgroup called `"OME"` that you can immediately try inspecting like `bf2raw_ome_meta = OmeZarrGroup.from_group(bf2raw_group["OME"])`.
-  If it exists, it may or may not have `bf2raw_ome_meta.children` with relative paths like `"../ms_0"`.
+* OME-Zarr multiscale groups *usually* define only a single multiscale (in which case they would be `GroupKind.MULTISCALE`), but they can define multiple (in which case they are `GroupKind.COLLECTION`). In this case, you could obtain the first scale key from each Multiscale, form the full paths like `f"{group_path}/{first_scale_key}"`, and display them to choose from. Then on the second round, pick the Multiscale that contains the chosen scale key.
+* In the `GroupKind.BF2RAW` case, there may or may not be a subgroup called `"OME"` that you can try inspecting like `bf2raw_ome_meta = OmeZarrGroup.from_group(bf2raw_group["OME"])`.
+  If it exists, it may or may not have `bf2raw_ome_meta.children` with `child.file.path` like `"../ms_0"`.
   The paths will all begin with `../` because they reference multiscales in `bf2raw_group`, which is the parent of `bf2raw_group["OME"]` (where the `bf2raw_ome_meta.children` are defined).
-  If the `bf2raw_group["OME"]` does *not* exist or if there are no `bf2raw_ome_meta.children`, this means there are an unknown number of multiscales in `bf2raw_group` and the only way to find out how many is to try progressively loading `bf2raw_group["0"]`, `bf2raw_group["1"]`, etc., until a load fails because that number is absent.
-* Any OME-Zarr group that has `.multiscales` may also have one "labels" subgroup per multiscale.
+  If the `bf2raw_group["OME"]` does *not* exist or if there are no `bf2raw_ome_meta.children`, this means there are an unknown number of multiscales in the parent `bf2raw_group` and the only way to find out how many is to try progressively loading `bf2raw_group["0"]`, `bf2raw_group["1"]`, etc., until a load fails because that number is absent.
+* Any OME-Zarr group that has `.multiscales` may also have one `"labels"` subgroup per multiscale.
   This subgroup will be a sibling to the multiscale's individual scale arrays.
   If a multiscale's first key is `ms0/scale0`, there may or may not be a group at `ms0/labels` that points to label multiscales (usually segmentation overlays).
   If you construct an `OmeZarrGroup` from this subgroup, its kind will be `GroupKind.LABELS` and it will contain some `.children` whose paths point to label multiscales.
@@ -289,5 +373,5 @@ These are `clearscale.Scene` instances and handle the scene as defined in OME-Za
 The specifics of the `Scene` class in clearscale are still in development, so expect changes to methods and parameters in the future.
 
 If you want to specially handle HCS plates or labels, you would currently need to implement custom parsing.
-clearscale does not offer a convenient form to access plate layout or label display metadata yet.
+clearscale does not offer a convenient API to access plate layout or label display metadata yet, though the contained Multiscales can be found via `group_meta.children`.
 You can detect these cases using `GroupKind.PLATE`, `.WELL`, `.LABELS`.

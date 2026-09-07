@@ -5,7 +5,7 @@ These examples are meant to show where clearscale fits in existing image code: Y
 ## Add metadata to existing arrays
 
 ```python
-from clearscale import BlueprintShapes, PixelSize, Scale, Shape, Unit
+from clearscale import BlueprintShapes, PixelSize, Scale, Shape, Unit, Multiscale, OmeZarrGroup
 
 # zarr_group can be zarr-python, TensorStore-backed code, or your own wrapper.
 # The only thing clearscale needs here is each array's shape.
@@ -22,12 +22,11 @@ base_scale = Scale(
 )
 
 blueprint = BlueprintShapes(recorded_shapes)
-multiscale = blueprint.apply_to_scale(base_scale)
+multiscale = Multiscale.from_single(base_scale, blueprint=blueprint)
 
-zarr_group.attrs["ome"] = {
-    "version": "0.5",
-    "multiscales": [multiscale.to_ome_zarr(version="0.5", axis_types="infer")],
-}
+zarr_group.attrs.update(
+    OmeZarrGroup.from_single(multiscale).to_attrs(version="0.5", axis_types="infer")
+)
 ```
 
 ## Reuse a multiscale's scaling pattern for a new image

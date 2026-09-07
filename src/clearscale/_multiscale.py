@@ -750,6 +750,41 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             "Please use the `copy` module and consider using `copy.deepcopy()` to avoid mutating the original."
         )
 
+    @classmethod
+    def from_single(
+        cls,
+        scale: Scale,
+        *,
+        scale_key: Optional[str] = "s0",
+        blueprint: Union[BlueprintShapes, BlueprintFactors, None] = None,
+        translation_shift_func: Optional[TranslationShiftFunction] = None,
+        rounding: Optional[RoundingMethod] = None,
+    ):
+        """
+        Expand the provided Scale into a new Multiscale.
+
+        If nothing else is provided, this is equivalent to `Multiscale({"s0": scale})`
+
+        Optionally provide a `blueprint` to specify how the data described by `scale` was/will be scaled, and compute matching metadata.
+        Related:
+          - `translation_shift_func`: Function that computes your scaling method's translation shift (see translation shift docs)
+          - `rounding`: Your scaling method's rounding behavior. Only required when `blueprint` is `BlueprintFactors`.
+
+        If you already have an existing Multiscale, and `scale` is one of its values, consider `Multiscale.derive` instead.
+        """
+        if not isinstance(scale_key, str):
+            raise TypeError(
+                f"Scale keys must be relative paths to each scale's data within the zarr group. Received: {scale_key!r}"
+            )
+        bp = blueprint if blueprint is not None else BlueprintShapes({scale_key: scale.shape})
+        if isinstance(bp, BlueprintFactors):
+            if rounding is None:
+                raise ValueError(
+                    "Must specify how your scaling method rounds when factors unevenly divide shape. E.g. `rounding='floor'`"
+                )
+            return bp.apply_to_scale(scale, translation_shift_func=translation_shift_func, rounding=rounding)
+        return bp.apply_to_scale(scale, translation_shift_func=translation_shift_func)
+
     @staticmethod
     def from_shapes(
         blueprint: Mapping[ScaleKey, ShapeLike],
@@ -1039,6 +1074,41 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
             _zero_scale_axes_by_key=self._zero_scale_axes_by_key,
             _legacy_convention_global_t_scale=transferred_global_t_scale,
         )
+
+    def derive(
+        self,
+        base_key: ScaleKey,
+        *,
+        blueprint: Union[BlueprintShapes, BlueprintFactors, None] = None,
+        derived_by: Union[SpatialRelation, Sequence[SpatialRelation], None] = None,
+        translation_shift_func: Optional[TranslationShiftFunction] = None,
+        rounding: Optional[RoundingMethod] = None,
+    ) -> "Multiscale":
+        """
+        Derive a new Multiscale from one of this Multiscale's own scale levels.
+
+        Deriving transfers `.coordinate_systems` from this Multiscale to the new one where possible,
+        and keeps the new one within the nifti-zarr convention, if this one is.
+
+        `blueprint`: How to expand the Scale at `base_key` into the derived Multiscale's levels.
+        Omit to extract the respective Scale as an independent Multiscale with just that one entry.
+        Related:
+          - `translation_shift_func`: Function that computes your scaling method's translation shift (see translation shift docs)
+          - `rounding`: Your scaling method's rounding behavior. Only required when `blueprint` is `BlueprintFactors`.
+
+        `derived_by`: The relation(s) describing how the new Multiscale was derived from the Scale at `base_key`.
+        For example, provide a `Translation` if the derived Multiscale is shifted from its parent's origin, or
+        an `AxisRearrangementTo` if axes were dropped/inserted/reordered.
+        The derived Multiscale will retain the relation as a reference to an external coordinate system.
+        """
+        new_ms = Multiscale.from_single(
+            self[base_key],
+            scale_key=base_key,
+            blueprint=blueprint,
+            translation_shift_func=translation_shift_func,
+            rounding=rounding,
+        )
+        return new_ms.as_derived_from(self, by=derived_by)
 
     # Ignore narrowing of `version: str` to Literal (nicer to be explicit)
     def to_ome_zarr(  # pyright: ignore[reportIncompatibleMethodOverride]

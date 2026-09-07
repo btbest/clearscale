@@ -6,7 +6,7 @@ Fits in any Python environment. Works with existing code. Handles all OME-Zarr v
 
 With `clearscale`, metadata runs alongside data processing.
 
-Ideally, to ensure data and metadata are in sync, the pipeline first specifies the operation plan as metadata, and then uses the metadata itself as parameters:
+Ideally, to ensure data and metadata are in sync, the pipeline first specifies the operation plan, and then uses the metadata itself as parameters:
 
 ```python
 from clearscale import Shape, PixelSize, Unit, BlueprintShapes, Scale, Multiscale, OmeZarrGroup
@@ -30,7 +30,7 @@ for scale_key, target_shape in scaling_blueprint.items():
 
 # 4. Expand and write metadata
 base = Scale(shape, pixel_size, unit)
-ms = Multiscale.from_shapes(scaling_blueprint, base=base)
+ms = Multiscale.from_single(base, blueprint=scaling_blueprint)
 group_meta = OmeZarrGroup.from_single(ms).to_attrs(version="0.6.rc0")
 zarr_group.attrs.update(group_meta)
 ```
@@ -86,9 +86,39 @@ dependencies:
 
 ## End-to-end examples
 
+### Dump a numpy array to OME-Zarr
+
+Even a single array needs to become a "multiscale" for OME-Zarr.
+
+```python
+import numpy as np
+import zarr
+from clearscale import OmeZarrGroup, Multiscale, Scale
+
+# You have some array
+image = np.random.random((128, 1024, 1024)).astype(np.float32)
+
+# 1. Create a zarr group to write it to
+# (zarr-format v3 because we specify OME-Zarr version 0.5 below, which must be written in zarr-format v3)
+group = zarr.open_group("demo-output/example1.ome.zarr", mode="w", zarr_format=3)
+
+# 2. Write data
+array_path = "s0"
+group.create_array(array_path, data=image)
+
+# 3. Write metadata
+# (Make a Scale, expand it to a Multiscale, put that in an OME-Zarr group)
+scale = Scale(shape=dict(zip("zyx", image.shape)))  # Axis keys are the minimum you really must specify
+group.attrs.update(
+    OmeZarrGroup
+    .from_single(Multiscale.from_single(scale, scale_key=array_path))
+    .to_attrs(version="0.5")
+)
+```
+
 ### Downsample a numpy array and save it as OME-Zarr
 
-The first example above used a "metadata-first" approach (first compute metadata blueprint, then scale data according to it).
+The first example at the top of this Readme used a "metadata-first" approach (first compute metadata blueprint, then scale data according to it).
 This example works the other way round (first scale data, then record what was done in blueprint).
 
 ```python
@@ -97,14 +127,14 @@ import numpy as np
 import zarr
 from skimage.transform import pyramid_gaussian
 
-from clearscale import BlueprintShapes, PixelSize, Scale, Shape, Unit, OmeZarrGroup
+from clearscale import BlueprintShapes, Scale, Shape, OmeZarrGroup, Multiscale
 
 # 1. Generate a pyramid
 image = np.random.random((128, 1024, 1024)).astype(np.float32)
 pyramid = [level.astype(np.float32) for level in pyramid_gaussian(image, downscale=2)]
 
 # 2. Write arrays to zarr on disk and record scaled shapes
-group = zarr.open_group("example.ome.zarr", mode="w")
+group = zarr.open_group("demo-output/example2.ome.zarr", mode="w")
 scaled_shapes = []
 for i, level in enumerate(pyramid):
     scale_key = f"s{i}"
@@ -119,13 +149,13 @@ for i, level in enumerate(pyramid):
 # 3. Describe the full-resolution image
 base = Scale(
     shape=Shape(zip("zyx", image.shape)),
-    pixel_size=PixelSize(z=25, y=240, x=240),
-    unit=Unit(z="micrometer", y="nanometer", x="nanometer"),
+    pixel_size=dict(z=25, y=240, x=240),
+    unit=dict(z="micrometer", y="nanometer", x="nanometer"),
 )
 
 # 4. Use the recorded scale shapes as a blueprint to expand a Multiscale
 blueprint = BlueprintShapes(scaled_shapes)
-multiscale = blueprint.apply_to_scale(base)
+multiscale = Multiscale.from_single(base, blueprint=blueprint)
 
 # 5. Save OME-Zarr metadata
 group_meta = OmeZarrGroup.from_single(multiscale).to_attrs(version="0.5", axis_types="infer")
@@ -145,9 +175,11 @@ LOCAL_PATH = Path(f"demo-output/platy-raw-{SCALE_KEY}.ome.zarr")
 
 # 1. Discover what's on the server
 remote_group = zarr.open_group(URL)
+
 remote_meta = clear.OmeZarrGroup.from_group(remote_group)
 assert remote_meta.kind is clear.GroupKind.MULTISCALE, "This tells us there is exactly one Multiscale in this group"
-assert remote_meta.version == "0.4"
+assert remote_meta.version == "0.4", "OME-Zarr version is a property of the group, not of individual Multiscales"
+
 source_multiscale = remote_meta.multiscales[0]
 assert SCALE_KEY in source_multiscale, "Multiscale is dict-like, with the sub-paths to arrays as keys"
 assert source_multiscale[SCALE_KEY].shape == {"z": 357, "y": 405, "x": 430}
@@ -156,14 +188,13 @@ assert source_multiscale[SCALE_KEY].shape == {"z": 357, "y": 405, "x": 430}
 source_array = remote_group[SCALE_KEY]
 local_group = zarr.open_group(str(LOCAL_PATH), mode="w", zarr_format=2)  # OME-Zarr v0.4 must use zarr-format v2
 print(f"Downloading {SCALE_KEY} data...")
-local_array = local_group.create_array(SCALE_KEY, data=source_array, overwrite=True)
+local_array = local_group.create_array(SCALE_KEY, data=source_array)
 
-# 3. Extract the correct scale metadata and upgrade it to valid independent metadata
-extracted_scale = source_multiscale[SCALE_KEY]
-target_multiscale = clear.Multiscale({SCALE_KEY: extracted_scale})
-local_group_meta = clear.OmeZarrGroup.from_single(target_multiscale)
+# 3. Derive a new Multiscale from the chosen Scale entry in the existing Multiscale
+target_multiscale = source_multiscale.derive(SCALE_KEY)
 
 # 4. Write the new metadata to the downloaded store
+local_group_meta = clear.OmeZarrGroup.from_single(target_multiscale)
 local_group.attrs.update(local_group_meta.to_attrs(version="0.4"))
 ```
 
