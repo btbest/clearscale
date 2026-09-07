@@ -66,9 +66,9 @@ def test_multiscale_to_ome_zarr_falls_back_on_nonuniform_t_scale():
         (Factor(y=2, x=2), ([0.5, 0.5], None)),
         (Translation(y=3, x=4), ([1.0, 1.0], [-3.0, -4.0])),
         ([Factor(y=2, x=2), Translation(y=3, x=4)], ([0.5, 0.5], [-3.0, -4.0])),
-        ([Translation(y=3, x=4), Factor(y=2, x=2)], ([2.0, 2.0], [3.0, 4.0])),
+        ([Translation(y=3, x=4), Factor(y=2, x=2)], ([0.5, 0.5], [-1.5, -2.0])),
         ([AxisRearrangementTo("zyx"), Translation(z=0, y=3, x=4)], ([1.0, 1.0], [-3.0, -4.0])),
-        ([Translation(y=3, x=4), AxisRearrangementTo("x")], ([1.0, 1.0], [-3.0, -4.0])),
+        ([Translation(y=3, x=4), AxisRearrangementTo("x")], ([1.0, 1.0], [0.0, -4.0])),
     ],
 )
 def test_multiscale_to_ome_zarr_serializes_compatible_coordinate_system_as_legacy_transforms(

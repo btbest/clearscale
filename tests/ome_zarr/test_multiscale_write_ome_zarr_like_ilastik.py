@@ -440,6 +440,7 @@ def test_write_ome_zarr_test_transformations_multi_scale_export():
     """
     input_scale_key = "source_scale"
     s = 34 / 8  # source scaling (resolution) = base shape / uncropped source shape
+    offset_tuple = (0, 0, 3, 3, 3)
     resolution_xyz = s
     target_scales = clearscale.BlueprintShapes(
         [
@@ -456,13 +457,13 @@ def test_write_ome_zarr_test_transformations_multi_scale_export():
     expected_downscale = pytest.approx([1.0, 1.0, s * 5 / 2, s * 5 / 2, s * 5 / 2])
     expected_multiscale_transforms = [
         {"type": "scale", "scale": [1.0, 1.0, 1.0, 1.0, 1.0]},
-        {"type": "translation", "translation": [0.0, 0.0, s * 3, s * 3, s * 3]},  # scaled offset
+        {"type": "translation", "translation": [s * o for o in offset_tuple]},
     ]
 
     axes = "tczyx"
     shape = Shape(zip(axes, (2, 2, 5, 5, 5)))
     input_multiscale = clearscale.Multiscale.from_shapes(clearscale.BlueprintShapes({input_scale_key: shape}))
-    export_offset = PixelOffset(zip(axes, (0, 0, 3, 3, 3)))
+    export_offset = PixelOffset(zip(axes, offset_tuple))
     result = write_ome_zarr_like_ilastik(
         shape,
         PixelSize(zip(axes, [1.0, 1.0, resolution_xyz, resolution_xyz, resolution_xyz])),

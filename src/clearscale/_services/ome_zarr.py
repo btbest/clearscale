@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from typing import Union, Dict, Literal, List, Any, Optional, Tuple, Protocol, Iterable, TYPE_CHECKING
 
 from clearscale._axis_values import ShapeLike, Translation, PixelSize, AxisKey, Factor
+from clearscale._services.matrices import is_identity_scale, DETERMINANT_SINGULARITY_TOLERANCE
 from clearscale._transforms import (
     TransformSequence,
     IdentityTransform,
@@ -186,7 +187,7 @@ def _as_transform_list(ome_transformations: Optional[OME_ZARR_TRANSFORMS]) -> Li
 @dataclass(frozen=True, slots=True)
 class MultiscaleTransforms(TransformSequence):
     def inverted(self) -> "InvertedMultiscaleTransforms":
-        sup = super().inverted()
+        sup = super(MultiscaleTransforms, self).inverted()
         return InvertedMultiscaleTransforms(transforms=sup.transforms).bound(source=self.target, target=self.source)
 
     def __post_init__(self):
@@ -306,40 +307,59 @@ class MultiscaleTransforms(TransformSequence):
             return InvertedMultiscaleTransforms(tuple(transforms)).inverted()
         raise ValueError(f"Cannot represent as (scale[, translation]): {transforms}")
 
-    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
+    def composed_with(self, earlier: "Transform") -> Optional["MultiscaleTransforms"]:
         if not isinstance(earlier, MultiscaleTransforms):
             return None
         if not self._endpoints_can_chain_after(earlier):
             return None
+        # Could go via super().canonicalized() to skip the algebra, but then we would lose the information
+        # whether self or earlier had an explicitly recorded identity translation.
         scale_product = self.scale_transform.composed_with(earlier.scale_transform)
         assert isinstance(scale_product, ScaleTransform), "scales can always compose"
-        if earlier.translation_transform is not None and self.translation_transform is not None:
-            translation_sum = self.translation_transform.composed_with(earlier.translation_transform)
+        earlier_translation_rescaled = None
+        if earlier.translation_transform is not None and not is_identity_scale(
+            self.scale_transform.scale, tolerance=DETERMINANT_SINGULARITY_TOLERANCE
+        ):
+            earlier_translation_rescaled = TranslationTransform(
+                tuple(t * s for t, s in zip(earlier.translation_transform.translation, self.scale_transform.scale))
+            )
+        later_translation_rescaled = None
+        if self.translation_transform is not None and not is_identity_scale(
+            earlier.scale_transform.scale, tolerance=DETERMINANT_SINGULARITY_TOLERANCE
+        ):
+            later_translation_rescaled = TranslationTransform(
+                tuple(t * s for t, s in zip(self.translation_transform.translation, earlier.scale_transform.scale))
+            )
+        if earlier_translation_rescaled is not None and later_translation_rescaled is not None:
+            translation_sum = later_translation_rescaled.composed_with(earlier_translation_rescaled)
             assert isinstance(translation_sum, TranslationTransform), "translations can always compose"
             transforms = (scale_product, translation_sum)
-        elif earlier.translation_transform is not None:
-            transforms = (scale_product, earlier.translation_transform)
-        elif self.translation_transform is not None:
-            transforms = (scale_product, self.translation_transform)
+        elif earlier_translation_rescaled is not None:
+            transforms = (scale_product, earlier_translation_rescaled)
+        elif later_translation_rescaled is not None:
+            transforms = (scale_product, later_translation_rescaled)
         else:
             transforms = (scale_product,)
-        return replace(
-            self,
-            source=self._composed_source(earlier),
-            target=self._composed_target(earlier),
-            transforms=transforms,
+        return replace(self, transforms=transforms).bound(
+            source=self._composed_source(earlier), target=self._composed_target(earlier)
         )
+
+    def simplified(self) -> "MultiscaleTransforms":
+        return self  # Avoid dropping explicitly recorded global identity by simplification
 
 
 class InvertedMultiscaleTransforms(TransformSequence):
     """Alias purely to roundtrip inversion while maintaining a recognisable legacy marker class."""
 
     def inverted(self) -> "MultiscaleTransforms":
-        sup = super().inverted()
+        sup = super(InvertedMultiscaleTransforms, self).inverted()
         return MultiscaleTransforms(transforms=sup.transforms).bound(source=self.target, target=self.source)
 
     def composed_with(self, earlier: "Transform") -> Optional["InvertedMultiscaleTransforms"]:
         return None  # Avoid folding into other TransformSequences
+
+    def simplified(self) -> "InvertedMultiscaleTransforms":
+        return self  # Avoid dropping explicitly recorded global identity by simplification
 
 
 def require_dataset_paths(raw: Mapping[str, Any]):

@@ -20,6 +20,7 @@ from typing import (
     List,
     Generic,
     TypeGuard,
+    cast,
 )
 
 from clearscale._axis_values import (
@@ -263,6 +264,9 @@ class NodeRef(Generic[TransformGraphNodeT]):
 
     def __hash__(self):
         return hash((type(self), self.name, id(self.owner)))
+
+    def __repr__(self):
+        return f"NodeRef(name='{self.name}', owner={type(self.owner).__name__}<id={id(self.owner)}, axes={tuple(self.owner.axes())})>"
 
     def to_ome_zarr(self, version: str = "0.6.rc0", path: Optional[str] = None) -> Dict[str, Any]:
         if path and isinstance(path, str):
@@ -790,7 +794,7 @@ class IdentityTransform(Transform):
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
         if not self._endpoints_can_chain_after(earlier):
             return None
-        return replace(earlier, source=self._composed_source(earlier), target=self._composed_target(earlier))
+        return replace(earlier).bound(source=self._composed_source(earlier), target=self._composed_target(earlier))
 
     def simplified(self) -> "IdentityTransform":
         return self
@@ -813,27 +817,27 @@ class TransformSequence(Transform):
     def inverted(self) -> "TransformSequence":
         if not self.is_invertible:
             raise ValueError("TransformSequence is not invertible: contains non-invertible transform(s).")
-        return TransformSequence(tuple(reversed([t.inverted() for t in self.transforms])))
+        return TransformSequence(tuple(reversed([t.inverted() for t in self.transforms]))).bound(
+            source=self.target, target=self.source
+        )
 
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
         if not self._endpoints_can_chain_after(earlier):
             return None
         source = self._composed_source(earlier)
         target = self._composed_target(earlier)
-        if type(earlier) is TransformSequence:
-            return replace(
-                earlier,
-                transforms=tuple(earlier.transforms + self.transforms),
-                source=source,
-                target=target,
-            )
-        return replace(self, transforms=(earlier,) + self.transforms, source=source, target=target)
+        new_transforms = (earlier,)
+        if type(earlier) is TransformSequence:  # exact type check to avoid ome_zarr.MultiscaleTransforms
+            new_transforms = earlier.transforms
+        return replace(self, transforms=new_transforms + self.transforms, source=None, target=None).bound(
+            source=source, target=target
+        )
 
     def simplified(self) -> "Transform":
         simplified_flattened: List[Transform] = []
         for t in self.transforms:
             simplified = t.simplified()
-            if isinstance(simplified, TransformSequence):
+            if type(simplified) is TransformSequence:  # exact type check to avoid ome_zarr.MultiscaleTransforms
                 simplified_flattened.extend(simplified)
             elif not isinstance(simplified, IdentityTransform):
                 simplified_flattened.append(simplified)
@@ -887,7 +891,7 @@ class TransformSequence(Transform):
         last_ndim = constraints[-1]
         delta = None
         if all(ndim.delta is not None for ndim in constraints):
-            delta = sum(ndim.delta for ndim in constraints)
+            delta = sum(cast(int, ndim.delta) for ndim in constraints)
         elif first_ndim.source is not None and last_ndim.target is not None:
             delta = last_ndim.target - first_ndim.source
         return _EndpointDimensionConstraints(

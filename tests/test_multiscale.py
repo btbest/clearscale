@@ -477,21 +477,28 @@ def test_multiscale_as_derived_from_rejects_mismatching_derivation():
 @pytest.mark.parametrize(
     "derived_axes, relations, expected_derivation_transform",
     [
-        pytest.param("zyx", [], IdentityTransform(), id="empty list"),
-        pytest.param("zyx", [Factor.identity("zyx")], ScaleTransform(scale=(1.0, 1.0, 1.0)), id="single-entry list"),
+        pytest.param("zyx", [], IdentityTransform(), id="empty_list"),
+        pytest.param("zyx", [Factor.identity("zyx")], IdentityTransform(), id="single_entry_identity"),
+        pytest.param("zyx", [Factor(z=2.0, y=2.0, x=2.0)], ScaleTransform(scale=(0.5, 0.5, 0.5)), id="single_factor"),
         pytest.param(
             "zyx",
             [Factor.identity("zyx"), Translation.identity("zyx")],
+            IdentityTransform(),
+            id="two_entry_identity",
+        ),
+        pytest.param(
+            "zyx",
+            [Factor(z=2.0, y=2.0, x=2.0), Translation(z=1.0, y=2.0, x=3.0)],
             TransformSequence(
-                (ScaleTransform(scale=(1.0, 1.0, 1.0)), TranslationTransform(translation=(0.0, 0.0, 0.0)))
+                (ScaleTransform(scale=(0.5, 0.5, 0.5)), TranslationTransform(translation=(-1.0, -2.0, -3.0)))
             ),
-            id="factor-translation",
+            id="factor_translation",
         ),
         pytest.param(
             "tyxz",
             [ProjectionTo("tzyx"), PermutationTo("tyxz")],
             TransformSequence((ProjectAxisTransform(inserts=(0,)), MapAxisTransform(map_axis=(0, 2, 3, 1)))),
-            id="insertion-permutation",
+            id="insertion_permutation",
         ),
     ],
 )
@@ -511,14 +518,14 @@ def test_multiscale_as_derived_from_accepts_list_of_relations(
     world = next(iter(world_refs))
     assert derived_ms._intrinsic_ref in result._transform_graph.all_system_refs
     assert world in result._transform_graph.all_system_refs
-    # We store `source_ms --derivation_t--> derived_ms` only if derivation isn't identity
+    # We store `source_ms --derivation_t--> derived_ms` only if relations has contents
     expected_n_transforms = 1 if not relations else 2
     assert len(result._transform_graph.transforms) == expected_n_transforms
     if relations:
         assert (
             expected_derivation_transform.bound(source=source_ms._intrinsic_ref, target=derived_ms._intrinsic_ref)
             in result._transform_graph.transforms
-        )
+        ), f"expected {source_ms._intrinsic_ref.name}-->{derived_ms._intrinsic_ref.name}"
     # Maybe slightly counterintuitive, but the expected
     # `derived_ms -> world` is the derivation *inverted*:
     # The derivation tells us how derived_ms was made from source_ms:
@@ -530,7 +537,7 @@ def test_multiscale_as_derived_from_accepts_list_of_relations(
     expected_t_inverted = expected_derivation_transform.inverted()
     assert (
         expected_t_inverted.bound(source=derived_ms._intrinsic_ref, target=world) in result._transform_graph.transforms
-    )
+    ), f"expected {derived_ms._intrinsic_ref.name}-->{world.name}"
 
 
 def test_multiscale_as_derived_from_relation_list_order_matters():
@@ -590,10 +597,15 @@ def test_multiscale_with_coordinate_system_accepts_single_relation():
 
 def test_multiscale_with_coordinate_system_accepts_relation_sequence():
     ms = _multiscale("zyx")
+    # This simulates a call where "`ms` was made from `world`" by translating, scaling, and inserting an axis.
+    # The relations when specifying "how to reach `world` from `ms`" then correspond to "how to undo what I did".
+    # If ms was "made from" world by [Translation(3, 4), Factor(2), Insert(z)],
+    # in other words, shifted (e.g. crop-offset) and then downscaled from world,
+    # then the relation to return from ms to world is [Drop(z), Factor(0.5), Translation(-3, -4)]
     relations = [
         AxisRearrangementTo("yx"),
-        Factor(y=2, x=2),
-        Translation(y=3, x=4),
+        Factor(y=0.5, x=0.5),
+        Translation(y=-3.0, x=-4.0),
     ]
 
     result = ms.with_coordinate_system("world", reached_by=relations)
@@ -601,16 +613,15 @@ def test_multiscale_with_coordinate_system_accepts_relation_sequence():
     world = next(ref for ref in result._transform_graph.all_system_refs if ref.name == "world")
     assert tuple(world.owner.axes()) == ("y", "x")
 
-    # Factor/Translation have their values each inverted, but their order is not flipped.
     # When specifying rearrange->factor->translation, the translation is already at "world" scale.
-    # Coordinate ms[0, 0, 0] == world[-3.0, -4.0]
-    # Coordinate ms[0, 1.0, 1.0] -> rearrange -> [1, 1] -> scale -> [0.5, 0.5] -> translate -> world[-2.5, -3.5]
-    # Coordinate ms[0, 10.0, 10.0] == world[2.0, 1.0]
+    # Coordinate ms[0, 0, 0] == world[3.0, 4.0] (ms is shifted relative to world origin)
+    # Coordinate ms[0, 1.0, 1.0] -> rearrange -> [1, 1] -> scale -> [2, 2] -> translate -> world[5.0, 6.0]
+    # Coordinate ms[0, 10.0, 10.0] == world[23.0, 24.0]
     expected = TransformSequence(
         (
             ProjectAxisTransform(drops=(0,)),
-            ScaleTransform((0.5, 0.5)),
-            TranslationTransform((-3.0, -4.0)),
+            ScaleTransform((2.0, 2.0)),
+            TranslationTransform((3.0, 4.0)),
         )
     ).bound(source=ms._intrinsic_ref, target=world)
     assert expected in result._transform_graph.transforms

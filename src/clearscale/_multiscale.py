@@ -41,6 +41,7 @@ from clearscale._axis_values import (
     RoundingMethod,
     OrderedAxes,
     AxisKey,
+    AxisKeyT,
 )
 from clearscale._errors import NoSuchCoordinateSystemError
 from clearscale._spatial_relations import SpatialRelation
@@ -96,9 +97,9 @@ class Scale:
     def __init__(
         self,
         shape: ShapeLike,
-        pixel_size: Optional[Union[PixelSize, Mapping[AxisKey, float]]] = None,
-        unit: Optional[Union[Unit, Mapping[AxisKey, str]]] = None,
-        translation: Optional[Union[Translation, Mapping[AxisKey, float]]] = None,
+        pixel_size: Optional[Union[PixelSize, Mapping[AxisKeyT, float]]] = None,
+        unit: Optional[Union[Unit, Mapping[AxisKeyT, str]]] = None,
+        translation: Optional[Union[Translation, Mapping[AxisKeyT, float]]] = None,
     ):
         shape = Shape(shape)
         pixel_size = PixelSize.fromkeys(shape) if pixel_size is None else PixelSize(pixel_size)
@@ -1024,21 +1025,21 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
                     # `self <--deriv--(>) other --t--> satellite` becomes `self --(deriv^-1)--t--> satellite` (preferred final direction)
                     edge = (
                         TransformSequence((derivation.inverted(), t))
-                        .collapsed()
+                        .canonicalized()
                         .bound(source=self._intrinsic_ref, target=resolved_ref)
                     )
                 elif t.source is satellite:
                     # `self <--deriv-- other <--t-- satellite` becomes `self <--deriv--t-- satellite` (prefer not inverting)
                     edge = (
                         TransformSequence((t, derivation))
-                        .collapsed()
+                        .canonicalized()
                         .bound(source=resolved_ref, target=self._intrinsic_ref)
                     )
                 elif t.is_invertible:
                     # `self <--deriv-- other (<)--t--> satellite` becomes `self <--deriv--(t^-1)-- satellite` (last resort)
                     edge = (
                         TransformSequence((t.inverted(), derivation))
-                        .collapsed()
+                        .canonicalized()
                         .bound(source=resolved_ref, target=self._intrinsic_ref)
                     )
                 else:
@@ -1055,9 +1056,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
                     existing_refs.append(resolved_ref)
                     to_merge_list.append(edge)
 
-        if not isinstance(derivation, IdentityTransform) and derivation not in self._transform_graph.transforms + tuple(
-            to_merge_list
-        ):
+        if relations and derivation not in self._transform_graph.transforms + tuple(to_merge_list):
             to_merge_list.append(derivation)
         if not to_merge_list and unchanged_t_scale:
             return self
@@ -1303,6 +1302,8 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         for t in candidates:
             if isinstance(t, ome_zarr.MultiscaleTransforms):
                 return t
+            if isinstance(t, ome_zarr.InvertedMultiscaleTransforms):
+                return t.inverted()
         for t in candidates:
             if not isinstance(t, TransformSequence):
                 continue
@@ -1325,7 +1326,10 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
                 )
         for t in candidates:
             try:
-                return ome_zarr.MultiscaleTransforms.from_transforms((t,))
+                if t.source == self._intrinsic_ref:
+                    return ome_zarr.MultiscaleTransforms.from_transforms((t,))
+                assert t.target == self._intrinsic_ref, f"all transforms must connect to self, {t!r}"
+                return ome_zarr.MultiscaleTransforms.from_transforms((t.inverted(),))
             except ValueError:
                 continue
         for t in candidates:
@@ -1389,7 +1393,7 @@ class Multiscale(_ScaleMapping[Scale], TransformGraphNode):
         rearrangement itself."""
         if len(path) < 1:
             return True
-        collapsed = TransformSequence(path).collapsed() if len(path) > 1 else path[0]
+        collapsed = TransformSequence(path).canonicalized() if len(path) > 1 else path[0]
         structural_types = (IdentityTransform, ProjectAxisTransform, MapAxisTransform)
         if isinstance(collapsed, TransformSequence):
             return all(isinstance(child, structural_types) for child in collapsed.transforms)

@@ -1,4 +1,4 @@
-from typing import Any, Mapping, Optional, Tuple
+from typing import Optional, Tuple
 
 AxisIndices = Tuple[int, ...]
 FloatVector = Tuple[float, ...]
@@ -26,6 +26,10 @@ def matrix_vector_multiply(matrix: FloatMatrix, vector: FloatVector) -> FloatVec
     if len(matrix[0]) != len(vector):
         raise ValueError(f"Cannot multiply {matrix_shape(matrix)} matrix by vector of length {len(vector)}")
     return tuple(sum(a * b for a, b in zip(row, vector)) for row in matrix)
+
+
+def is_identity_scale(scale: FloatVector, *, tolerance: float) -> bool:
+    return all(abs(value - 1.0) <= tolerance for value in scale)
 
 
 def is_identity_matrix(matrix: FloatMatrix, *, tolerance: float = DETERMINANT_SINGULARITY_TOLERANCE) -> bool:

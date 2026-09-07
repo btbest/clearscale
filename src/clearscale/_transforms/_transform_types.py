@@ -37,6 +37,7 @@ from clearscale._services.matrices import (
     zero_matrix_columns,
     zero_matrix_rows,
     DETERMINANT_SINGULARITY_TOLERANCE,
+    is_identity_scale,
 )
 from clearscale._transforms._base import (
     _EndpointDimensionConstraints,
@@ -612,40 +613,30 @@ class AffineTransform(AffineRepresentableTransform):
         translation = self._translation()
         target_ndim, source_ndim = matrix_shape(linear)
         components: List[Union[AffineRepresentableSubtypes, "AffineTransform"]] = []
-        has_project_component = target_ndim != source_ndim
-        if has_project_component:
-            projection_and_linear = self._decompose_project_axis(linear)
-            if projection_and_linear is not None:
-                project, post_project_linear = projection_and_linear
-                components.append(project)
-                components.extend(self._decompose_square_linear_else_affine(post_project_linear))
-            elif target_ndim > source_ndim:
-                inserts = tuple(range(source_ndim, target_ndim))
-                components.append(ProjectAxisTransform(inserts=inserts))
-                post_project_linear = tuple(
-                    row + tuple(1.0 if row_index == col else 0.0 for col in inserts)
-                    for row_index, row in enumerate(linear)
-                )
-                components.extend(self._decompose_square_linear_else_affine(post_project_linear))
-            else:
-                pre_project_linear = linear + tuple(
-                    tuple(1.0 if row == col else 0.0 for col in range(source_ndim))
-                    for row in range(target_ndim, source_ndim)
-                )
-                components.extend(self._decompose_square_linear_else_affine(pre_project_linear))
-                components.append(ProjectAxisTransform(drops=tuple(range(target_ndim, source_ndim))))
+        projection_and_linear = self._decompose_project_axis(linear)
+        if projection_and_linear is not None:
+            project, post_project_linear = projection_and_linear
+            components.append(project)
+            components.extend(self._decompose_square_linear_else_affine(post_project_linear))
+        elif target_ndim > source_ndim:
+            inserts = tuple(range(source_ndim, target_ndim))
+            components.append(ProjectAxisTransform(inserts=inserts))
+            post_project_linear = tuple(
+                row + tuple(1.0 if row_index == col else 0.0 for col in inserts) for row_index, row in enumerate(linear)
+            )
+            components.extend(self._decompose_square_linear_else_affine(post_project_linear))
+        elif target_ndim < source_ndim:
+            drops = tuple(range(target_ndim, source_ndim))
+            pre_project_linear = linear + tuple(
+                tuple(1.0 if row == col else 0.0 for col in range(source_ndim)) for row in drops
+            )
+            components.extend(self._decompose_square_linear_else_affine(pre_project_linear))
+            components.append(ProjectAxisTransform(drops=drops))
         else:
             linear_components = self._decompose_square_linear(linear)
             if linear_components is None:
-                square_projection = self._decompose_square_projection(linear)
-                if square_projection is None:
-                    return self
-                drop, reduced_linear, insert = square_projection
-                components.append(drop)
-                components.extend(self._decompose_square_linear_else_affine(reduced_linear))
-                components.append(insert)
-            else:
-                components.extend(linear_components)
+                return self
+            components.extend(linear_components)
         if not all(abs(value) <= IDENTITY_TOLERANCE for value in translation):
             components.append(TranslationTransform(translation=translation))
         if not components:
@@ -709,12 +700,19 @@ class AffineTransform(AffineRepresentableTransform):
 
     @staticmethod
     def _decompose_project_axis(linear: FloatMatrix) -> Optional[Tuple["ProjectAxisTransform", FloatMatrix]]:
+        """
+        Decompose ProjectAxis in "clean" cases:
+        - Non-square linear matrix: Decompose shape differences that match zero-rows and columns
+        - Square linear matrix: Decompose zero-scales as drop+insert of that axis
+        Does not decompose zero-rows or zero-columns as ProjectAxis if they are not matched,
+        as this would make the ndim-delta of the decomposition different from the ndim-delta of the affine.
+        """
         target_ndim, source_ndim = matrix_shape(linear)
         drops = zero_matrix_columns(linear, tolerance=IDENTITY_TOLERANCE)
         inserts = zero_matrix_rows(linear, tolerance=IDENTITY_TOLERANCE)
         retained_sources = tuple(i for i in range(source_ndim) if i not in drops)
         retained_targets = tuple(i for i in range(target_ndim) if i not in inserts)
-        if len(retained_sources) != len(retained_targets):
+        if (not drops and not inserts) or len(retained_sources) != len(retained_targets):
             return None
         reduced = tuple(tuple(linear[row][col] for col in retained_sources) for row in retained_targets)
         reduced_row_by_target = {target: row for row, target in enumerate(retained_targets)}
@@ -738,35 +736,6 @@ class AffineTransform(AffineRepresentableTransform):
         return ProjectAxisTransform(drops=drops, inserts=inserts), post_project_linear
 
     @staticmethod
-    def _decompose_square_projection(
-        linear: FloatMatrix,
-    ) -> Optional[Tuple["ProjectAxisTransform", FloatMatrix, "ProjectAxisTransform"]]:
-        """Factor a square rank-reducing matrix as drop, reduced linear, then insert.
-
-        Zero columns identify source axes that do not contribute and zero rows identify
-        target axes created with value zero. Equal drop and insert indices are left to
-        the zero-scale policy instead of being reinterpreted as axis projection.
-        """
-        rows, cols = matrix_shape(linear)
-        assert rows == cols, "shouldn't call this with a non-square matrix"
-        drops = zero_matrix_columns(linear, tolerance=IDENTITY_TOLERANCE)
-        inserts = zero_matrix_rows(linear, tolerance=IDENTITY_TOLERANCE)
-        if not drops or not inserts or drops == inserts:
-            return None
-        retained_sources = tuple(i for i in range(cols) if i not in drops)
-        retained_targets = tuple(i for i in range(rows) if i not in inserts)
-        if len(retained_sources) != len(retained_targets):
-            # This means the intermediate (i.e. drops -> intermediate -> inserts) would be non-square.
-            # There is no unambiguous decomposition at this point.
-            return None
-        reduced_linear = tuple(tuple(linear[row][col] for col in retained_sources) for row in retained_targets)
-        return (
-            ProjectAxisTransform(drops=drops),
-            reduced_linear,
-            ProjectAxisTransform(inserts=inserts),
-        )
-
-    @staticmethod
     def _decompose_square_linear(linear: FloatMatrix) -> Optional[Tuple[AffineRepresentableSubtypes, ...]]:
         """Returns list of components if linear is decomposable into allowed specific types
         (MapAxis, Rotation, Scale).
@@ -781,8 +750,9 @@ class AffineTransform(AffineRepresentableTransform):
             # Like ((-3, 0), (0, 2))
             # Can also catch 180° rotations = horizontal reflections like ((-1, 0), (0, -1))
             scale = tuple(linear[i][i] for i in range(rows))
-            if AffineTransform._are_any_zeros(scale, tolerance=IDENTITY_TOLERANCE):
-                return None
+            assert not AffineTransform._are_any_zeros(
+                scale, tolerance=IDENTITY_TOLERANCE
+            ), f"zero scales should be extracted in _decompose_project_axis, {linear}"
             return (ScaleTransform(scale=scale),)
         map_and_scale = monomial_matrix_decompose(linear, tolerance=IDENTITY_TOLERANCE)
         if map_and_scale is not None and AffineTransform._are_all_positive(
@@ -793,7 +763,7 @@ class AffineTransform(AffineRepresentableTransform):
             # Design choice: 90° and 270° rotations can also be expressed as mapaxis + neg. scale.
             # We want them to instead be caught as RotationTransform.
             map_axis = MapAxisTransform(map_axis=map_and_scale[0])
-            if not AffineTransform._is_scale_identity(map_and_scale[1], tolerance=IDENTITY_TOLERANCE):
+            if not is_identity_scale(map_and_scale[1], tolerance=IDENTITY_TOLERANCE):
                 return (map_axis, ScaleTransform(scale=map_and_scale[1]))
             return (map_axis,)
         # Like ((1, -2, 3), (0, 0, 0), (0, 0, 1))
@@ -809,7 +779,7 @@ class AffineTransform(AffineRepresentableTransform):
         if not is_rotation_matrix(rotation, tolerance=IDENTITY_TOLERANCE):
             return None
         t_rotation = RotationTransform(rotation=rotation)
-        if not AffineTransform._is_scale_identity(scale, tolerance=IDENTITY_TOLERANCE):
+        if not is_identity_scale(tuple(scale), tolerance=IDENTITY_TOLERANCE):
             return (t_rotation, ScaleTransform(scale=tuple(scale)))
         return (t_rotation,)
 
@@ -829,10 +799,6 @@ class AffineTransform(AffineRepresentableTransform):
     @staticmethod
     def _are_all_positive(numbers: Iterable[float], tolerance: float) -> bool:
         return all(value > tolerance for value in numbers)
-
-    @staticmethod
-    def _is_scale_identity(scale: Iterable[float], tolerance: float) -> bool:
-        return all(abs(value - 1.0) <= tolerance for value in scale)
 
 
 @dataclass(frozen=True, slots=True)

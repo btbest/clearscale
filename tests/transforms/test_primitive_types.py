@@ -1,6 +1,7 @@
 from typing import cast, Tuple
 
 import pytest
+from clearscale._services.ome_zarr import MultiscaleTransforms
 from clearscale._transforms import (
     CoordinateSystem,
     IdentityTransform,
@@ -173,7 +174,7 @@ def test_scale_simplified_keeps_nonidentity(scale):
 
 def test_scale_zero_does_not_roundtrip_through_affine():
     zero_scale = ScaleTransform((0,))
-    assert zero_scale._to_affine_transform().simplified() == AffineTransform(((0, 0),))
+    assert zero_scale._to_affine_transform().simplified() == ProjectAxisTransform(drops=(0,), inserts=(0,))
 
 
 def test_translation_bound_rejects_endpoint_axis_count_mismatch():
@@ -618,37 +619,37 @@ def test_affine_composed_with_rejects_mismatching_dims(earlier, later):
             ((2, 0, 0), (0, 3, 0)),
             ((4, 0, 0), (0, 5, 0)),
             ScaleTransform((8, 15)),
-            id="scale only",
+            id="scale_only",
         ),
         pytest.param(
             ((0.25, 0, 7), (0, 1, 3)),
             ((4, 0, 2.2), (0, 1, 5)),
             TranslationTransform((30.2, 8.0)),  # (4*7 + 2.2, 1*3 + 5)
-            id="scale composes to identity",
+            id="scale_composes_to_identity",
         ),
         pytest.param(
             ((1, 0, 7), (0, 2, 3)),
             ((4, 0, -28), (0, 1, -3)),  # (4*7 - 28 = 0, 1*3 - 3 = 0)
             ScaleTransform((4, 2)),
-            id="translation composes to identity + scale",
+            id="translation_composes_to_identity_plus_scale",
         ),
         pytest.param(
             ((0, -1, 7), (1, 0, 3)),
             ((1, 0, -7), (0, 1, -3)),
             RotationTransform(((0, -1), (1, 0))),
-            id="translation composes to identity + rotation",
+            id="translation_composes_to_identity_plus_rotation",
         ),
         pytest.param(
             ((1, 0, 0, 0), (0, 0, 1, 0)),
             ((1, 0, 0), (0, 1, 0)),
             ProjectAxisTransform(drops=(1,)),
-            id="project axis",
+            id="project_axis",
         ),
         pytest.param(
             ((0, 1, 0), (1, 0, 0)),
             ((1, 0, 0), (0, 1, 0)),
             MapAxisTransform((1, 0)),
-            id="map axis",
+            id="map_axis",
         ),
     ],
 )
@@ -721,6 +722,108 @@ def test_affine_composed_with_does_not_simplify_combinations(earlier, later, exp
 )
 def test_affine_map_and_project_axis_compose_in_both_directions(earlier: Transform, later: Transform, expected):
     assert later.composed_with(earlier) == expected
+
+
+@pytest.mark.parametrize(
+    "linear,expected_simplified",
+    [
+        pytest.param(
+            ((1, 0, 0), (0, 0, 1)),
+            ProjectAxisTransform(drops=(1,)),
+            id="non_square_missing_row_matching_zero_col",
+        ),
+        pytest.param(
+            ((1, 0, 0), (0, 1, 1)),
+            TransformSequence(
+                (AffineTransform(((1, 0, 0, 0), (0, 1, 1, 0), (0, 0, 1, 0))), ProjectAxisTransform(drops=(2,)))
+            ),
+            id="non_square_missing_row_no_matching_zero_col",
+        ),
+        pytest.param(
+            ((1, 0, 0), (0, 0, 0)),
+            ProjectAxisTransform(drops=(1, 2), inserts=(1,)),
+            id="non_square_missing_row_excess_zero_col",
+        ),
+        pytest.param(
+            ((1, 0), (0, 0), (0, 1)),
+            ProjectAxisTransform(inserts=(1,)),
+            id="non_square_missing_col_matching_zero_row",
+        ),
+        pytest.param(
+            ((1, 0), (1, 0), (0, 1)),
+            TransformSequence(
+                (ProjectAxisTransform(inserts=(2,)), AffineTransform(((1, 0, 0, 0), (1, 0, 0, 0), (0, 1, 1, 0))))
+            ),
+            id="non_square_missing_col_no_matching_zero_row",
+        ),
+        pytest.param(
+            ((1, 0), (0, 0), (0, 0)),
+            ProjectAxisTransform(drops=(1,), inserts=(1, 2)),
+            id="non_square_missing_col_excess_zero_row",
+        ),
+        pytest.param(
+            ((1, 0, 0), (0, 0, 0), (0, 0, 1)),
+            ProjectAxisTransform(drops=(1,), inserts=(1,)),
+            id="square_zero_scale",
+        ),
+        pytest.param(
+            ((1, 0, 0), (0, 0, 1), (0, 0, 1)),
+            AffineTransform(((1, 0, 0, 0), (0, 0, 1, 0), (0, 0, 1, 0))),
+            id="square_zero_col_only",
+        ),
+        pytest.param(
+            ((1, 0, 0), (0, 0, 0), (0, 1, 1)),
+            AffineTransform(((1, 0, 0, 0), (0, 0, 0, 0), (0, 1, 1, 0))),
+            id="square_zero_row_only",
+        ),
+        pytest.param(
+            ((1, 0, 0), (0, 0, 0), (1, 0, 0)),
+            AffineTransform(((1, 0, 0, 0), (0, 0, 0, 0), (1, 0, 0, 0))),
+            id="square_zero_scale_excess_col",
+        ),
+        pytest.param(
+            ((1, 0, 1), (0, 0, 0), (0, 0, 0)),
+            AffineTransform(((1, 0, 1, 0), (0, 0, 0, 0), (0, 0, 0, 0))),
+            id="square_zero_scale_excess_row",
+        ),
+    ],
+)
+def test_affine_simplified_decomposes_project_axis(linear, expected_simplified):
+    affine = tuple(row + (0,) for row in linear)  # add 0 translations
+    simplified = AffineTransform(affine).simplified()
+    assert simplified == expected_simplified
+
+
+@pytest.mark.parametrize(
+    "linear",
+    [
+        pytest.param(
+            ((1, 0, 0), (0, 0, 0), (0, 1, 1)),
+            id="square_zero_row_only",
+        ),
+        pytest.param(
+            ((1, 0, 0), (0, 0, 1), (0, 0, 1)),
+            id="square_zero_col_only",
+        ),
+        pytest.param(
+            ((1, 0, 0), (0, 0, 0), (1, 0, 0)),
+            id="square_zero_scale_excess_col",
+        ),
+        pytest.param(
+            ((1, 0, 1), (0, 0, 0), (0, 0, 0)),
+            id="square_zero_scale_excess_row",
+        ),
+    ],
+)
+def test_affine_simplified_does_not_decompose_square_except_zero_scale(linear):
+    # Additional variants for test_affine_simplified_decomposes_project_axis,
+    # but these do *not* decompose a ProjectAxis out of the affine.
+    # For the "excess" cases, one could decompose a `drop - affine - insert` sequence,
+    # and the remaining middle affine would be a reduced square. Could be useful, maybe tbd.
+    affine = tuple(row + (0,) for row in linear)  # add 0 translations
+    affine_transform = AffineTransform(affine)
+    simplified = affine_transform.simplified()
+    assert simplified is affine_transform
 
 
 @pytest.mark.parametrize(
@@ -835,9 +938,8 @@ def test_affine_map_and_project_axis_compose_in_both_directions(earlier: Transfo
             ((0, 0, 0, 10), (2, 0, 0, 20), (0, 0, 3, 30)),
             TransformSequence(
                 (
-                    ProjectAxisTransform(drops=(1,)),
-                    ScaleTransform((2, 3)),
-                    ProjectAxisTransform(inserts=(0,)),
+                    ProjectAxisTransform(drops=(1,), inserts=(0,)),
+                    ScaleTransform((1, 2, 3)),
                     TranslationTransform((10, 20, 30)),
                 )
             ),
@@ -860,7 +962,6 @@ def test_affine_simplified_decomposes_sequence_and_collapsed_roundtrips(affine, 
     "affine",
     [
         pytest.param(AffineTransform(((1, 0.25, 0), (0, 1, 0))), id="shear"),
-        pytest.param(AffineTransform(((1, 0, 0), (0, 0, 0))), id="zero scale is_diagonal true"),
         pytest.param(AffineTransform(((1, 1, 0), (0, 0, 0))), id="zero scale is_diagonal false"),
         pytest.param(AffineTransform(_ome_zarr_path="affine.zarr"), id="path-backed scale"),
         pytest.param(AffineTransform(((0, 0, 1, 0), (0, 0, 0, 0), (0, 0, 2, 0))), id="square but drops != inserts"),
@@ -1213,3 +1314,41 @@ def test_project_axis_rejects_drop_index_out_of_bounds():
 
     with pytest.raises(ValueError, match="ProjectAxisTransform requires at least 4 source axes"):
         _ = ProjectAxisTransform(drops=(3,), source=source, target=target)
+
+
+def test_ome_zarr_multiscale_transforms_composed_with_rescales_translations():
+    earlier = MultiscaleTransforms((ScaleTransform((2.0,)), TranslationTransform((3.0,))))
+    later = MultiscaleTransforms((ScaleTransform((4.0,)), TranslationTransform((5.0,))))
+
+    composed = later.composed_with(earlier)
+
+    assert isinstance(composed, MultiscaleTransforms)
+    assert composed.scale_transform is not None
+    assert composed.scale_transform.scale == (8.0,)
+    assert composed.translation_transform is not None
+    assert composed.translation_transform.translation == ((5.0 * 2.0) + (3.0 * 4.0),)
+
+
+@pytest.mark.parametrize(
+    "earlier_transl, later_transl",
+    [
+        (None, TranslationTransform((0.0,))),
+        (TranslationTransform((0.0,)), None),
+        (TranslationTransform((0.0,)), TranslationTransform((0.0,))),
+    ],
+)
+def test_ome_zarr_multiscale_transforms_composed_with_preserves_explicit_identity_translations(
+    earlier_transl, later_transl
+):
+    earlier_ts = (ScaleTransform((2.0,)), earlier_transl) if earlier_transl is not None else (ScaleTransform((2.0,)),)
+    later_ts = (ScaleTransform((4.0,)), later_transl) if later_transl is not None else (ScaleTransform((4.0,)),)
+    earlier = MultiscaleTransforms(earlier_ts)
+    later = MultiscaleTransforms(later_ts)
+
+    composed = later.composed_with(earlier)
+
+    assert isinstance(composed, MultiscaleTransforms)
+    assert composed.scale_transform is not None
+    assert composed.scale_transform.scale == (8.0,)
+    assert composed.translation_transform is not None
+    assert composed.translation_transform.translation == (0.0,)
