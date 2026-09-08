@@ -20,6 +20,7 @@ from typing import (
     List,
     Generic,
     TypeGuard,
+    cast,
 )
 
 from clearscale._axis_values import (
@@ -40,6 +41,99 @@ _RefT = TypeVar("_RefT")
 
 PRE_TRANSFORMS_VERSIONS = ("0.1", "0.2", "0.3", "0.4", "0.5")
 PRE_COLLECTIONS_VERSIONS = PRE_TRANSFORMS_VERSIONS + ("0.6.rc0",)
+
+
+@dataclass(frozen=True, slots=True)
+class _EndpointDimensionConstraints:
+    """
+    Descriptions of a transform's source and target dimensionality as can be inferred from the transform's payload.
+    This class only validates that different given properties are consistent with each other, and that no property is
+    empty when given others imply it.
+    Caller's responsibility to provide all values, even when the required value is obvious (e.g. source and target are
+    given -> delta is implied, but caller must still specify it; like `.exact` does).
+    In the most common case, i.e. exact source and target ndim, all properties are specified (use `.exact()`).
+    The special cases are:
+    - ProjectAxis: knows delta, and may know source_min and/or target_min. source, target and *_max are None.
+    - Coordinates: fully unconstrained. All None.
+    - Displacements: knows delta=0, otherwise unconstrained. All except delta are None.
+    - ByDimension: knows only target and source_min. source, source_max and delta are None.
+    """
+
+    source: Optional[int] = None
+    """Exact source dimensionality. If given, then source == source_min == source_max."""
+    target: Optional[int] = None
+    """Exact target dimensionality. If given, then target == target_min == target_max."""
+    source_min: Optional[int] = None
+    """Minimum source dimensionality. If min and max given, min <= max."""
+    target_min: Optional[int] = None
+    """Minimum target dimensionality. If min and max given, min <= max."""
+    source_max: Optional[int] = None
+    """Maximum source dimensionality. If min and max given, then max >= min."""
+    target_max: Optional[int] = None
+    """Maximum target dimensionality. If min and max given, then max >= min."""
+    delta: Optional[int] = None
+    """Known ndim difference. If exact source and target are given, then delta == target - source."""
+
+    def __post_init__(self):
+        dimensions = {
+            "source": self.source,
+            "target": self.target,
+            "source_min": self.source_min,
+            "target_min": self.target_min,
+            "source_max": self.source_max,
+            "target_max": self.target_max,
+        }
+        for name, value in dimensions.items():
+            assert (
+                value is None or isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            ), f"{name} must be a non-negative integer or None, not {value!r}"
+        assert (
+            self.delta is None or isinstance(self.delta, int) and not isinstance(self.delta, bool)
+        ), f"delta must be an integer or None, not {self.delta!r}"
+        assert (
+            self.source_min is None or self.source_max is None or self.source_min <= self.source_max
+        ), f"{self.source_min} > {self.source_max}"
+        assert self.source is None or self.source == self.source_min, f"{self.source} != {self.source_min}"
+        assert self.source is None or self.source == self.source_max, f"{self.source} != {self.source_max}"
+        assert (
+            self.target_min is None or self.target_max is None or self.target_min <= self.target_max
+        ), f"{self.target_min} > {self.target_max}"
+        assert self.target is None or self.target == self.target_min, f"{self.target} != {self.target_min}"
+        assert self.target is None or self.target == self.target_max, f"{self.target} != {self.target_max}"
+
+        assert (
+            self.source is None or self.target is None or self.delta == self.target - self.source
+        ), f"{self.delta} != {self.target} - {self.source}"
+        if self.delta is not None and (self.source is None or self.target is None):
+            source_min = self.source_min or 0
+            target_min = self.target_min or 0
+            feasible_source_min = max(source_min, target_min - self.delta, 0)
+            feasible_source_max_candidates = []
+            if self.source_max is not None:
+                feasible_source_max_candidates.append(self.source_max)
+            if self.target_max is not None:
+                feasible_source_max_candidates.append(self.target_max - self.delta)
+            if feasible_source_max_candidates and feasible_source_min > min(feasible_source_max_candidates):
+                raise ValueError("Endpoint dimensionality constraints are inconsistent with delta.")
+
+    def __bool__(self):
+        """Truthy if this Constraint object specifies any constraints at all."""
+        return not self.is_unconstrained()
+
+    @classmethod
+    def exact(cls, *, source: int, target: int) -> "_EndpointDimensionConstraints":
+        return cls(
+            source=source,
+            target=target,
+            source_min=source,
+            target_min=target,
+            source_max=source,
+            target_max=target,
+            delta=target - source,
+        )
+
+    def is_unconstrained(self) -> bool:
+        return self == type(self)()
 
 
 class CoordinateContinuity(str, enum.Enum):
@@ -170,6 +264,9 @@ class NodeRef(Generic[TransformGraphNodeT]):
 
     def __hash__(self):
         return hash((type(self), self.name, id(self.owner)))
+
+    def __repr__(self):
+        return f"NodeRef(name='{self.name}', owner={type(self.owner).__name__}<id={id(self.owner)}, axes={tuple(self.owner.axes())})>"
 
     def to_ome_zarr(self, version: str = "0.6.rc0", path: Optional[str] = None) -> Dict[str, Any]:
         if path and isinstance(path, str):
@@ -339,14 +436,35 @@ class Transform(ABC):
     @abstractmethod
     def inverted(self) -> "Transform": ...
     @abstractmethod
-    def composed_with(self, earlier: "Transform") -> Optional["Transform"]: ...
-    @abstractmethod
-    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
-        """Source and target dimensionality implied by this transform's payload.
-        Return (source_ndim, target_ndim) if dimensionality can be inferred from payload.
-        If this is not possible (e.g. identity: no payload, return None),
-        convention is to assume source dimensionality == target dimensionality.
+    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
+        """Return one transform equivalent to applying `earlier` and then `self`.
+
+        Composition preserves the most specific transform type that can represent the
+        result without inspecting whether its payload happens to be an identity or a
+        special case of another type. For example, composing two scale transforms
+        returns a scale transform, including when their factors multiply to one.
+
+        Return `None` when the transforms cannot be represented by one transform,
+        their payload values are unavailable, or their dimensions or bound endpoints
+        do not chain. Use `simplified` separately when a canonical, less general
+        representation is wanted.
         """
+        ...
+
+    @abstractmethod
+    def simplified(self) -> "Transform":
+        """Return the simplest supported representation of this transform's payload.
+
+        Inspect `self` (recursively for container transforms) and return another transform type,
+        such as identity for a unit scale or a scale/translation sequence for an affine that can be
+        decomposed as such.
+        Return `self` when no simpler representation is available or payload values are unavailable.
+        """
+        ...
+
+    @abstractmethod
+    def _ndim_by_payload(self) -> _EndpointDimensionConstraints:
+        """Endpoint dimensionality constraints implied by this transform's payload."""
         ...
 
     @abstractmethod
@@ -355,11 +473,6 @@ class Transform(ABC):
         At a minimum, this includes {'type': '<ome-zarr type name>'}.
         The common properties (input/output) are handled in the base class."""
         pass
-
-    def _source_ndim_must_eq_target_ndim(self) -> bool:
-        """For most transform types, this is True.
-        Only Coordinates, ProjectAxis, ByDimension can modify ndim."""
-        return True
 
     def __post_init__(self) -> None:
         if self._ome_zarr_name is not None and (not isinstance(self._ome_zarr_name, str) or not self._ome_zarr_name):
@@ -473,8 +586,6 @@ class Transform(ABC):
         t_type = ome_dict.get("type")
         if t_type == "identity":
             source, target = cls._parse_source_and_target(ome_dict)
-            from clearscale._transforms._transform_types import IdentityTransform
-
             return IdentityTransform(_ome_zarr_name=cls._parse_name(ome_dict), source=source, target=target)
         elif t_type == "scale":
             from clearscale._transforms._transform_types import ScaleTransform
@@ -565,49 +676,134 @@ class Transform(ABC):
     def _validate_bound_axes(self) -> None:
         source_axes = tuple(self.source.owner.axes()) if isinstance(self.source, NodeRef) else None
         target_axes = tuple(self.target.owner.axes()) if isinstance(self.target, NodeRef) else None
+        self._validate_ndims_compatible_with_payload(
+            len(source_axes) if source_axes is not None else None,
+            len(target_axes) if target_axes is not None else None,
+            source_axes=source_axes,
+            target_axes=target_axes,
+        )
 
+    def _validate_ndims_compatible_with_payload(
+        self,
+        source_ndim: Optional[int],
+        target_ndim: Optional[int],
+        *,
+        source_axes: Optional[OrderedAxes] = None,
+        target_axes: Optional[OrderedAxes] = None,
+    ) -> None:
         ndim = self._ndim_by_payload()
-        if ndim is not None:
-            source_ndim, target_ndim = ndim
-            if source_axes is not None and len(source_axes) != source_ndim:
-                raise ValueError(
-                    f"{self.__class__.__name__} expects {source_ndim} source axes, but its source "
-                    f"coordinate system has {len(source_axes)}: {list(source_axes)}"
-                )
-            if target_axes is not None and len(target_axes) != target_ndim:
-                raise ValueError(
-                    f"{self.__class__.__name__} expects {target_ndim} target axes, but its target "
-                    f"coordinate system has {len(target_axes)}: {list(target_axes)}"
-                )
+        if ndim.is_unconstrained():
+            return
 
-        if (
-            ndim is None
-            and source_axes is not None
-            and target_axes is not None
-            and self._source_ndim_must_eq_target_ndim()
-            and len(source_axes) != len(target_axes)
-        ):
-            raise ValueError(
-                f"{self.__class__.__name__} source and target must be same dimensionality: "
-                f"source {list(source_axes)} vs target {list(target_axes)}"
-            )
+        source_axes_suffix = f": {list(source_axes)}" if source_axes is not None else ""
+        target_axes_suffix = f": {list(target_axes)}" if target_axes is not None else ""
+
+        if source_ndim is not None:
+            if ndim.source is not None:
+                assert ndim.source_min == ndim.source_max == ndim.source, "enforced by constraint-object"
+                if source_ndim != ndim.source:
+                    raise ValueError(
+                        f"{self.__class__.__name__} expects {ndim.source} source axes, but its source "
+                        f"coordinate system has {source_ndim}{source_axes_suffix}"
+                    )
+            else:
+                if ndim.source_min is not None and source_ndim < ndim.source_min:
+                    raise ValueError(
+                        f"{self.__class__.__name__} requires at least {ndim.source_min} source axes, but its source "
+                        f"coordinate system has {source_ndim}{source_axes_suffix}"
+                    )
+                if ndim.source_max is not None and source_ndim > ndim.source_max:
+                    raise ValueError(
+                        f"{self.__class__.__name__} allows at most {ndim.source_max} source axes, but its source "
+                        f"coordinate system has {source_ndim}{source_axes_suffix}"
+                    )
+
+        if target_ndim is not None:
+            if ndim.target is not None:
+                assert ndim.target_min == ndim.target_max == ndim.target, "enforced by constraint-object"
+                if target_ndim != ndim.target:
+                    raise ValueError(
+                        f"{self.__class__.__name__} expects {ndim.target} target axes, but its target "
+                        f"coordinate system has {target_ndim}{target_axes_suffix}"
+                    )
+            else:
+                if ndim.target_min is not None and target_ndim < ndim.target_min:
+                    raise ValueError(
+                        f"{self.__class__.__name__} requires at least {ndim.target_min} target axes, but its target "
+                        f"coordinate system has {target_ndim}{target_axes_suffix}"
+                    )
+                if ndim.target_max is not None and target_ndim > ndim.target_max:
+                    raise ValueError(
+                        f"{self.__class__.__name__} allows at most {ndim.target_max} target axes, but its target "
+                        f"coordinate system has {target_ndim}{target_axes_suffix}"
+                    )
+
+        if ndim.delta is not None and source_ndim is not None and target_ndim is not None:
+            actual_delta = target_ndim - source_ndim
+            if actual_delta != ndim.delta:
+                if ndim.delta == 0:
+                    if source_axes is not None and target_axes is not None:
+                        msg = (
+                            f"{self.__class__.__name__} source and target must be same dimensionality: "
+                            f"source {list(source_axes)} vs target {list(target_axes)}"
+                        )
+                    else:
+                        msg = (
+                            f"{self.__class__.__name__} source and target must be same dimensionality: "
+                            f"source ndim={source_ndim} vs target ndim={target_ndim}"
+                        )
+                else:
+                    axes_suffix = (
+                        f": source {list(source_axes)} vs target {list(target_axes)}"
+                        if source_axes is not None and target_axes is not None
+                        else ""
+                    )
+                    msg = (
+                        f"{self.__class__.__name__} requires target - source ndim = {ndim.delta}, "
+                        f"but the bound coordinate systems have delta={actual_delta}{axes_suffix}"
+                    )
+                raise ValueError(msg)
 
     def _endpoints_can_chain_after(self, earlier: "Transform") -> bool:
-        if earlier.target is None or self.source is None or earlier.target == self.source:
-            return True
+        if earlier.target is not None and self.source is not None:
+            return earlier.target == self.source
         self_ndim = self._ndim_by_payload()
         earlier_ndim = earlier._ndim_by_payload()
-        if self_ndim is None or earlier_ndim is None:
+        if self_ndim.source is None or earlier_ndim.target is None:
             return True
-        self_source_ndim = self_ndim[0]
-        earlier_target_ndim = earlier_ndim[1]
-        return self_source_ndim == earlier_target_ndim
+        return self_ndim.source == earlier_ndim.target
 
     def _composed_source(self, earlier: "Transform") -> Optional[AnyRef]:
         return earlier.source if earlier.source is not None else self.source
 
     def _composed_target(self, earlier: "Transform") -> Optional[AnyRef]:
         return self.target if self.target is not None else earlier.target
+
+
+@dataclass(frozen=True, slots=True)
+class IdentityTransform(Transform):
+    # Note (to be deleted): Identity is actually not representable as affine
+    # because it has no payload, so it does not know its ndim...
+    @property
+    def is_invertible(self) -> bool:
+        return True
+
+    def inverted(self) -> "IdentityTransform":
+        return replace(self, source=self.target, target=self.source)
+
+    def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
+        if not self._endpoints_can_chain_after(earlier):
+            return None
+        return replace(earlier).bound(source=self._composed_source(earlier), target=self._composed_target(earlier))
+
+    def simplified(self) -> "IdentityTransform":
+        return self
+
+    def _ndim_by_payload(self) -> _EndpointDimensionConstraints:
+        return _EndpointDimensionConstraints(delta=0)
+
+    def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
+        return {"type": "identity"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,21 +817,36 @@ class TransformSequence(Transform):
     def inverted(self) -> "TransformSequence":
         if not self.is_invertible:
             raise ValueError("TransformSequence is not invertible: contains non-invertible transform(s).")
-        return TransformSequence(tuple(reversed([t.inverted() for t in self.transforms])))
+        return TransformSequence(tuple(reversed([t.inverted() for t in self.transforms]))).bound(
+            source=self.target, target=self.source
+        )
 
     def composed_with(self, earlier: "Transform") -> Optional["Transform"]:
         if not self._endpoints_can_chain_after(earlier):
             return None
         source = self._composed_source(earlier)
         target = self._composed_target(earlier)
-        if type(earlier) is TransformSequence:
-            return replace(
-                earlier,
-                transforms=tuple(earlier.transforms + self.transforms),
-                source=source,
-                target=target,
-            )
-        return replace(self, transforms=(earlier,) + self.transforms, source=source, target=target)
+        new_transforms = (earlier,)
+        if type(earlier) is TransformSequence:  # exact type check to avoid ome_zarr.MultiscaleTransforms
+            new_transforms = earlier.transforms
+        return replace(self, transforms=new_transforms + self.transforms, source=None, target=None).bound(
+            source=source, target=target
+        )
+
+    def simplified(self) -> "Transform":
+        simplified_flattened: List[Transform] = []
+        for t in self.transforms:
+            simplified = t.simplified()
+            if type(simplified) is TransformSequence:  # exact type check to avoid ome_zarr.MultiscaleTransforms
+                simplified_flattened.extend(simplified)
+            elif not isinstance(simplified, IdentityTransform):
+                simplified_flattened.append(simplified)
+        if not simplified_flattened:
+            return IdentityTransform(source=self.source, target=self.target)
+        if len(simplified_flattened) == 1:
+            return simplified_flattened[0].bound(source=self.source, target=self.target)
+        endpoints_cleared = replace(self, transforms=tuple(simplified_flattened), source=None, target=None)
+        return endpoints_cleared.bound(source=self.source, target=self.target)
 
     def _get_subtype_ome_zarr_properties(self, version: str) -> Dict[str, Any]:
         return {
@@ -663,18 +874,35 @@ class TransformSequence(Transform):
             object.__setattr__(self, "source", inferred_source)
         if self.target is None and inferred_target is not None:
             object.__setattr__(self, "target", inferred_target)
+        if self.source != inferred_source and inferred_source is not None:
+            raise ValueError(
+                f"TransformSequence.source must be (first child).source. Received {self.source!r} != {inferred_source!r}"
+            )
+        if self.target != inferred_target and inferred_target is not None:
+            raise ValueError(
+                f"TransformSequence.target must be (last child).target. Received {self.target!r} != {inferred_target!r}"
+            )
         self._validate_child_ndim_chain()
         Transform.__post_init__(self)
 
-    def _ndim_by_payload(self) -> Optional[Tuple[int, int]]:
-        first_ndim = self.transforms[0]._ndim_by_payload()
-        last_ndim = self.transforms[-1]._ndim_by_payload()
-        if first_ndim is None or last_ndim is None:
-            return None
-        return first_ndim[0], last_ndim[1]
-
-    def _source_ndim_must_eq_target_ndim(self) -> bool:
-        return all(t._source_ndim_must_eq_target_ndim() for t in self.transforms)
+    def _ndim_by_payload(self) -> _EndpointDimensionConstraints:
+        constraints = tuple(t._ndim_by_payload() for t in self.transforms)
+        first_ndim = constraints[0]
+        last_ndim = constraints[-1]
+        delta = None
+        if all(ndim.delta is not None for ndim in constraints):
+            delta = sum(cast(int, ndim.delta) for ndim in constraints)
+        elif first_ndim.source is not None and last_ndim.target is not None:
+            delta = last_ndim.target - first_ndim.source
+        return _EndpointDimensionConstraints(
+            source=first_ndim.source,
+            target=last_ndim.target,
+            source_min=first_ndim.source_min,
+            target_min=last_ndim.target_min,
+            source_max=first_ndim.source_max,
+            target_max=last_ndim.target_max,
+            delta=delta,
+        )
 
     def __hash__(self):
         return hash(self.transforms)
@@ -706,6 +934,13 @@ class TransformSequence(Transform):
         return replace(self, source=source, target=target, transforms=new_transforms)
 
     def collapsed(self, *, raise_uncollapsed: bool = False) -> "Transform | TransformSequence":
+        """
+        Reduce the sequence's length by composing the contained transforms.
+        Returns the shortest sequence that is semantically identical.
+        Returns a single Transform if the entire sequence can be composed.
+        Raises ValueError if raise_uncollapsed and the sequence cannot be composed into a single Transform.
+        The returned transform(s) may be more 'complex' types (e.g. [Scale, Translation] -> Affine).
+        """
         result: List[Transform] = [self.transforms[0]]
 
         for current in self.transforms[1:]:
@@ -722,28 +957,57 @@ class TransformSequence(Transform):
             return result[0]
         return replace(self, transforms=tuple(result))
 
+    def canonicalized(self) -> "Transform":
+        """Reduce the sequence to its canonical representation, meaning the 'simplest' sequence
+        that is semantically equivalent.
+        In particular, this removes Identity, and other transform types if their values effectively
+        encode an identity, and decomposes AffineTransforms into sequences of ProjectAxis, MapAxis,
+        Rotation, Scale, and Translation depending on its values."""
+        return self.collapsed().simplified()
+
     def _validate_child_ndim_chain(self) -> None:
-        earlier_target_ndim: Optional[int] = None
+        earlier_target_min: Optional[int] = None
+        earlier_target_max: Optional[int] = None
         earlier: Optional[Transform] = None
 
         for transform in self.transforms:
             ndim = transform._ndim_by_payload()
-            if ndim is None:
-                if not transform._source_ndim_must_eq_target_ndim():
-                    earlier_target_ndim = None
-                    earlier = None
-                continue
+            source_min = ndim.source_min
+            source_max = ndim.source_max
 
-            source_ndim, target_ndim = ndim
-            if earlier_target_ndim is not None and source_ndim != earlier_target_ndim:
-                assert earlier is not None
+            if earlier_target_min is not None:
+                source_min = max(source_min or earlier_target_min, earlier_target_min)
+            if earlier_target_max is not None:
+                source_max = min(source_max or earlier_target_max, earlier_target_max)
+
+            if source_max is not None and source_min is not None and source_min > source_max:
+                assert earlier is not None, "cannot happen in the first iteration"
+                # source_max must have come from earlier. min>max on current ndim would be dev error caught earlier.
                 raise ValueError(
-                    "Transform chain dimensionality mismatches: "
-                    f"{type(earlier).__name__}(target_ndim={earlier_target_ndim!r}) != "
-                    f"{type(transform).__name__}(source_ndim={source_ndim!r})"
+                    f"Transform chain ndim mismatch: {source_min=} > {source_max=}. "
+                    f"{type(earlier).__name__}(ndim={earlier._ndim_by_payload()!r}) != "
+                    f"{type(transform).__name__}(ndim={ndim!r})"
                 )
 
-            earlier_target_ndim = target_ndim
+            if ndim.delta is None:
+                target_min = ndim.target_min
+                target_max = ndim.target_max
+            else:
+                target_min = source_min + ndim.delta if source_min is not None else None
+                target_max = source_max + ndim.delta if source_max is not None else None
+                if ndim.target_min is not None:
+                    target_min = max(target_min or ndim.target_min, ndim.target_min)
+                if ndim.target_max is not None:
+                    target_max = min(target_max if target_max is not None else ndim.target_max, ndim.target_max)
+
+            if target_min is not None and target_max is not None and target_min > target_max:
+                raise ValueError(
+                    f"Transform chain ndim mismatch: {target_min=} > {target_max=}. "
+                    f"{type(transform).__name__}(ndim={ndim!r}) after {source_min=}, {source_max=}"
+                )
+
+            earlier_target_min = target_min
+            earlier_target_max = target_max
             earlier = transform
 
 

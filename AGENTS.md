@@ -6,7 +6,7 @@
 - `_spatial_relations.py` defines the SpatialRelation base and simple non-mapping implementations (PermutationTo, ProjectionTo)
 - `_axis_values.py` defines primitives (Shape, Unit, PixelSize, ...)
 - `_affines.py` defines nested AxisValues (Linear matrices, their Coefficient building block, and Affine container)
-- `_transforms` contains the new concepts from OME-Zarr 0.6. `_base.py` defines the transformation graph, transform base class and TransformSequence (which still interacts with the graph). `_transform_types.py` implements the various Transform subclasses according to the OME-Zarr 0.6 spec. The public API for users to interact with Transforms is the SpatialRelation.
+- `_transforms` contains the new concepts from OME-Zarr 0.6. `_base.py` defines the transformation graph, transform base class, IdentityTransform and TransformSequence (which still interacts with the graph). `_transform_types.py` implements the payload-specific Transform subclasses according to the OME-Zarr 0.6 spec. The public API for users to interact with Transforms is the SpatialRelation.
 - `_multiscale.py` defines the primary user-value objects (Scale, Multiscale, BlueprintShapes and BlueprintFactors)
 - `services` breaks out static helpers, mostly for `_multiscale.py`. `matrices.py` is for `_transforms` (Rotation, Affine)
 - `_translation_shifts.py` defines public helpers for diagnosing and calculating coordinate offsets introduced by scaling functions (related to `_multiscale.py`)

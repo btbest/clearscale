@@ -1,5 +1,6 @@
-from typing import Any, Mapping, Tuple
+from typing import Optional, Tuple
 
+AxisIndices = Tuple[int, ...]
 FloatVector = Tuple[float, ...]
 FloatMatrix = Tuple[FloatVector, ...]
 
@@ -27,6 +28,10 @@ def matrix_vector_multiply(matrix: FloatMatrix, vector: FloatVector) -> FloatVec
     return tuple(sum(a * b for a, b in zip(row, vector)) for row in matrix)
 
 
+def is_identity_scale(scale: FloatVector, *, tolerance: float) -> bool:
+    return all(abs(value - 1.0) <= tolerance for value in scale)
+
+
 def is_identity_matrix(matrix: FloatMatrix, *, tolerance: float = DETERMINANT_SINGULARITY_TOLERANCE) -> bool:
     rows, cols = matrix_shape(matrix)
     if rows != cols:
@@ -45,7 +50,47 @@ def is_diagonal_matrix(matrix: FloatMatrix, *, tolerance: float = DETERMINANT_SI
     return all(abs(value) < tolerance for i, row in enumerate(matrix) for j, value in enumerate(row) if i != j)
 
 
+def zero_matrix_rows(matrix: FloatMatrix, *, tolerance: float = DETERMINANT_SINGULARITY_TOLERANCE) -> AxisIndices:
+    """Return the indices of rows whose values are all zero within ``tolerance``."""
+    return tuple(i for i, row in enumerate(matrix) if all(abs(value) <= tolerance for value in row))
+
+
+def zero_matrix_columns(matrix: FloatMatrix, *, tolerance: float = DETERMINANT_SINGULARITY_TOLERANCE) -> AxisIndices:
+    """Return the indices of columns whose values are all zero within ``tolerance``."""
+    return zero_matrix_rows(matrix_transpose(matrix), tolerance=tolerance)
+
+
+def monomial_matrix_decompose(
+    matrix: FloatMatrix, *, tolerance: float = DETERMINANT_SINGULARITY_TOLERANCE
+) -> Optional[Tuple[AxisIndices, FloatVector]]:
+    """Decompose a square monomial matrix into a permutation and row factors.
+
+    A monomial matrix has exactly one non-zero value in every row and column. The
+    returned permutation gives the source column selected by each output row, and the
+    factors are those selected values. Consequently, the original matrix equals a
+    diagonal matrix of ``factors`` multiplied by the permutation matrix.
+    """
+    rows, cols = matrix_shape(matrix)
+    if rows != cols:
+        return None
+    selected_columns = []
+    factors = []
+    for row in matrix:
+        nonzero_columns = tuple(i for i, value in enumerate(row) if abs(value) > tolerance)
+        if len(nonzero_columns) != 1:
+            return None
+        selected_column = nonzero_columns[0]
+        selected_columns.append(selected_column)
+        factors.append(row[selected_column])
+    if set(selected_columns) != set(range(cols)):
+        return None
+    return tuple(selected_columns), tuple(factors)
+
+
 def is_rotation_matrix(rotation: FloatMatrix, *, tolerance: float = DETERMINANT_SINGULARITY_TOLERANCE) -> bool:
+    rows, cols = matrix_shape(rotation)
+    if rows != cols:
+        return False
     determinant = matrix_determinant(rotation)
     if abs(determinant - 1.0) > tolerance:
         return False

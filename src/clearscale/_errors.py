@@ -20,3 +20,15 @@ class MismatchingMultiscaleError(ValueError):
         super().__init__(f"No coordinate system named {name!r} in Multiscale provided for path {path!r}")
         self.path = path
         self.name = name
+
+
+class CannotConvertToAffineError(ValueError):
+    """
+    Raised by AffineRepresentableTransform.to_affine_transform when the transform's payload is missing
+    (path given instead).
+    In case of ProjectAxisTransform.to_affine_transform, raised when the provided ndim params are nonsense.
+    """
+
+    def __init__(self, transform: object):
+        msg = f"{transform.__class__.__name__} cannot be converted to AffineTransform with the available values."
+        super().__init__(msg)
